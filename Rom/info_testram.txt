@@ -1,0 +1,29 @@
+1) tstram_e.rom
+
+- tester RAM PMD-85 od Nostalcompa. Jedna se o verzi urcenou pro Eprom, ktera se osadi na pozici 1. Eprom s monitorem (E - vedle 8228)
+- zbyle Eprom B,C,D mohou zustat, ale pri ozivovani neznameho pocitace je lepsi je vyjmout
+- urceno pro verze 1 az 2A, ale u 2A testuje jen klasickych 48KB
+- funguje i v emulatoru. Staci soubor nacist jako Monitor v menu Nastroje - nastaveni - zmena modelu
+
+Prubeh a vyhodnoceni testu po zapnuti ci resetu pocitace: 
+1 kratke pipnuti se soucasnym bliknutim cervene a zlute LED indikuje zacatek testu RAM v rozsahu 0000-3FFF
+2 kratka pipnuti se soucasnym bliknutim cervene a zlute LED indikuji zacatek testu RAM v rozsahu 4000-7FFF
+3 kratka pipnuti se soucasnym bliknutim cervene a zlute LED indikuji zacatek testu RAM v rozsahu C000-FFFF (videoram)
+Test videoram je videt take na obrazovce (bila, cerna, pruhy)
+
+Jsou-li vsechny tri bloky RAM v poradku zapise se do videoram hodnota 06h (svisle pruhy) 
+a zacne nekonecne prerusovane pipani doprovazene stridavym blikanim zlute a cervene LED na klavesnici.
+
+Pokud nekde selze kontrolni cteni, rozsviti se natrvalo cervena LED a ozve se trvaly neprerusovany ton (taky nekonecny:-))
+- podle poctu predchozich pipnuti se da zjistit, ve ktere oblasti je vada. Je-li PMD osazeno pametmi 4116, je hned jasne, 
+ve ktere rade se vadna pamet nachazi. Zjistit konkretni pouzdro zatim neni mozne, ale taky by to slo doprogramovat:-))
+
+Kazdy blok RAM se testuje celkem 4x hodnotami 00h, 55h, AAh a FFh
+
+***********************************************************************************************************************************************   
+
+2) tstram_s.rom
+
+- tester RAM PMD-85 od neznameho autora (predal Sillicon). Jedna se o verzi urcenou pro Eprom, ktera se osadi na pozici 1. Eprom s monitorem (E)
+- kompatibilita s verzemi, prubeh testu a jeho vyhodnoceni nezname... 
+- funguje i v emulatoru. Staci soubor nacist jako monitor v menu Nastroje - nastaveni - zmena modelu

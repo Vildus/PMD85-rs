@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/pmd85-core", "crates/pmd85-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+pmd85-core = { path = "crates/pmd85-core" }
+
+[profile.release]
+opt-level = 3

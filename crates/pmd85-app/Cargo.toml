@@ -1,0 +1,19 @@
+[package]
+name = "pmd85-app"
+description = "Desktop application for the PMD 85 emulator (wgpu renderer)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "pmd85"
+path = "src/main.rs"
+
+[dependencies]
+pmd85-core = { workspace = true }
+wgpu = "30"
+winit = "0.30"
+pollster = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"

@@ -1,0 +1,8 @@
+[package]
+name = "pmd85-core"
+description = "Emulation core for the Tesla PMD 85 family of 8-bit computers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
