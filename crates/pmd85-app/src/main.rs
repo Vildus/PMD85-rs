@@ -104,12 +104,12 @@ impl ApplicationHandler for Application {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if !response.consumed {
-                    if let Some(key) = keys::map(&event) {
+                    for key in keys::map(&event) {
                         self.app
                             .machine
                             .bus
                             .keyboard
-                            .set_key(key, event.state.is_pressed());
+                            .set_key(*key, event.state.is_pressed());
                     }
                 }
             }

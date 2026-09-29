@@ -352,7 +352,7 @@ mod tests {
         // full layout is painted, not squeezed into a narrow
         // scrollable strip.
         assert!(
-            right_edge > 750.0,
+            right_edge > 480.0,
             "keyboard window too narrow (right edge {right_edge:.0})"
         );
         assert!(

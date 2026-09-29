@@ -3,7 +3,13 @@
 //! port B). Column 15 carries the special Shift/Stop keys, so it is ANDed
 //! into every scan, exactly like the hardware diode arrangement.
 //!
-//! Matrix positions and legends follow MAME's driver (src/mame/tesla/pmd85.cpp).
+//! Positions follow the reference layout (and the monitor 3 key-decode
+//! table at monit3.rom 0x2D0, which reads back `QWERTZUIOP@\`,
+//! `ASDFGHJKL;:[`, ` YXCVBNM,./` and `1234567890_{`):
+//! QWERTZ with Z in the Q row and Y in the bottom row, and the control
+//! keys in a grid at the right end of each row — WRK/C-D/RCL above
+//! INS-PTL/DEL/CLR above the arrow block. MAME's driver labels the Y/Z
+//! and CLR/RCL matrix slots differently; the ROM table is definitive.
 
 /// A key of the emulated PMD 85 keyboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -30,8 +36,8 @@ pub enum Key {
     Digit8,
     Digit9,
     Digit0,
-    Minus,   // PMD key between 0 and backspace (prints = / _)
-    Equals,  // PMD key right of Minus (prints { } )
+    Minus,   // PMD key right of 0 (prints _ / =)
+    Equals,  // PMD key right of Minus (prints { / } )
     Q,
     W,
     E,
@@ -100,7 +106,7 @@ pub fn matrix_pos(key: Key) -> (usize, u8) {
         Digit2 => (1, 0x02),
         W => (1, 0x04),
         S => (1, 0x08),
-        Z => (1, 0x10),
+        Y => (1, 0x10),
 
         K2 => (2, 0x01),
         Digit3 => (2, 0x02),
@@ -122,7 +128,7 @@ pub fn matrix_pos(key: Key) -> (usize, u8) {
 
         K5 => (5, 0x01),
         Digit6 => (5, 0x02),
-        Y => (5, 0x04),
+        Z => (5, 0x04),
         H => (5, 0x08),
         B => (5, 0x10),
 
@@ -173,8 +179,8 @@ pub fn matrix_pos(key: Key) -> (usize, u8) {
         CursorDown => (13, 0x08),
         Enter => (13, 0x10),
 
-        ClrScr => (14, 0x01),
-        Recall => (14, 0x02),
+        Recall => (14, 0x01),
+        ClrScr => (14, 0x02),
         CursorRight => (14, 0x04),
         LineEnd => (14, 0x08),
         Tab => (14, 0x10),
@@ -281,6 +287,32 @@ mod tests {
         kb.set_key(Key::M, true);
         // Monitor writes e.g. 0xF0 + column; only the low nibble matters
         assert_eq!(kb.read_rows(0xF7), !0x10);
+    }
+
+    #[test]
+    fn layout_follows_the_reference_geometry() {
+        // QWERTZ: Z in the Q row, Y in the bottom row (the monitor 3
+        // decode table prints Z/Y for these slots).
+        assert_eq!(matrix_pos(Key::Z), (5, 0x04));
+        assert_eq!(matrix_pos(Key::Y), (1, 0x10));
+        assert_eq!(matrix_pos(Key::Q), (0, 0x04));
+        assert_eq!(matrix_pos(Key::P), (9, 0x04));
+        // Control cluster grid at the row ends: WRK/C-D/RCL above
+        // INS-PTL/DEL/CLR.
+        assert_eq!(matrix_pos(Key::Wrk), (12, 0x01));
+        assert_eq!(matrix_pos(Key::Cd), (13, 0x01));
+        assert_eq!(matrix_pos(Key::Recall), (14, 0x01));
+        assert_eq!(matrix_pos(Key::Insert), (12, 0x02));
+        assert_eq!(matrix_pos(Key::Delete), (13, 0x02));
+        assert_eq!(matrix_pos(Key::ClrScr), (14, 0x02));
+        // Punctuation per the monitor decode table.
+        assert_eq!(matrix_pos(Key::Minus), (10, 0x02)); // _ =
+        assert_eq!(matrix_pos(Key::Equals), (11, 0x02)); // { }
+        assert_eq!(matrix_pos(Key::OpenBracket), (10, 0x04)); // @ `
+        assert_eq!(matrix_pos(Key::Semicolon), (9, 0x08)); // ; +
+        assert_eq!(matrix_pos(Key::Quote), (10, 0x08)); // : *
+        assert_eq!(matrix_pos(Key::Backslash), (11, 0x08)); // [ ]
+        assert_eq!(matrix_pos(Key::Space), (0, 0x10));
     }
 
     #[test]

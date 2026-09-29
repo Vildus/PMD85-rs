@@ -1,89 +1,199 @@
 //! Host keyboard mapping: winit physical keys to PMD 85 keys.
 //!
-//! The PMD 85 has a QWERTZ layout; we map by physical position for the
-//! letters that coincide and note that Y/Z swap on real QWERTZ hardware.
+//! The map is positional: the host key sitting at the same physical
+//! location as a PMD 85 key presses that key. The PMD 85 is QWERTZ
+//! (Z in the Q row, Y in the bottom row), so the host Y/Z keys swap
+//! meanings, and the keys right of P map to the PMD `@` and `\` keys.
+//! The PMD 85 has no numeric keypad: the host numpad duplicates the
+//! main digits, and its operators press SHIFT combos of the PMD keys
+//! that print them (`+` is SHIFT + the `; +` key, `-` SHIFT + `0`,
+//! `*` SHIFT + the `: *` key).
 
 use pmd85_core::keyboard::Key;
-use winit::event::ElementState;
+use winit::event::KeyEvent;
 use winit::keyboard::{KeyCode, PhysicalKey};
 
-/// Map a winit keyboard event to an emulated key press/release.
-pub fn map(event: &winit::event::KeyEvent) -> Option<Key> {
-    let PhysicalKey::Code(code) = event.physical_key else {
-        return None;
-    };
+/// The PMD keys pressed by a host key: usually one, but numpad
+/// operators also press SHIFT.
+fn keys_for(code: KeyCode) -> &'static [Key] {
+    use Key::*;
     match code {
-        KeyCode::KeyA => Some(Key::A),
-        KeyCode::KeyB => Some(Key::B),
-        KeyCode::KeyC => Some(Key::C),
-        KeyCode::KeyD => Some(Key::D),
-        KeyCode::KeyE => Some(Key::E),
-        KeyCode::KeyF => Some(Key::F),
-        KeyCode::KeyG => Some(Key::G),
-        KeyCode::KeyH => Some(Key::H),
-        KeyCode::KeyI => Some(Key::I),
-        KeyCode::KeyJ => Some(Key::J),
-        KeyCode::KeyK => Some(Key::K),
-        KeyCode::KeyL => Some(Key::L),
-        KeyCode::KeyM => Some(Key::M),
-        KeyCode::KeyN => Some(Key::N),
-        KeyCode::KeyO => Some(Key::O),
-        KeyCode::KeyP => Some(Key::P),
-        KeyCode::KeyQ => Some(Key::Q),
-        KeyCode::KeyR => Some(Key::R),
-        KeyCode::KeyS => Some(Key::S),
-        KeyCode::KeyT => Some(Key::T),
-        KeyCode::KeyU => Some(Key::U),
-        KeyCode::KeyV => Some(Key::V),
-        KeyCode::KeyW => Some(Key::W),
-        KeyCode::KeyX => Some(Key::X),
-        // PMD 85 is QWERTZ: host Z is at the PMD Y position and vice versa.
-        KeyCode::KeyY => Some(Key::Z),
-        KeyCode::KeyZ => Some(Key::Y),
-        KeyCode::Digit0 => Some(Key::Digit0),
-        KeyCode::Digit1 => Some(Key::Digit1),
-        KeyCode::Digit2 => Some(Key::Digit2),
-        KeyCode::Digit3 => Some(Key::Digit3),
-        KeyCode::Digit4 => Some(Key::Digit4),
-        KeyCode::Digit5 => Some(Key::Digit5),
-        KeyCode::Digit6 => Some(Key::Digit6),
-        KeyCode::Digit7 => Some(Key::Digit7),
-        KeyCode::Digit8 => Some(Key::Digit8),
-        KeyCode::Digit9 => Some(Key::Digit9),
-        KeyCode::Space => Some(Key::Space),
-        KeyCode::Enter | KeyCode::NumpadEnter => Some(Key::Enter),
-        KeyCode::Tab => Some(Key::Tab),
-        KeyCode::Backspace => Some(Key::Backspace),
-        KeyCode::Delete => Some(Key::Delete),
-        KeyCode::Insert => Some(Key::Insert),
-        KeyCode::ArrowLeft => Some(Key::CursorLeft),
-        KeyCode::ArrowRight => Some(Key::CursorRight),
-        KeyCode::ArrowUp => Some(Key::CursorUp),
-        KeyCode::ArrowDown => Some(Key::CursorDown),
-        KeyCode::Home => Some(Key::LineStart),
-        KeyCode::End => Some(Key::LineEnd),
-        KeyCode::ShiftLeft | KeyCode::ShiftRight => Some(Key::Shift),
-        // STOP doubles as the Break-like key on the host.
-        KeyCode::Escape | KeyCode::ControlLeft | KeyCode::ControlRight => Some(Key::Stop),
+        // Q row, positional (QWERTZ): host Y sits where the PMD has Z.
+        KeyCode::KeyQ => &[Q],
+        KeyCode::KeyW => &[W],
+        KeyCode::KeyE => &[E],
+        KeyCode::KeyR => &[R],
+        KeyCode::KeyT => &[T],
+        KeyCode::KeyY => &[Z],
+        KeyCode::KeyU => &[U],
+        KeyCode::KeyI => &[I],
+        KeyCode::KeyO => &[O],
+        KeyCode::KeyP => &[P],
+        KeyCode::BracketLeft => &[OpenBracket],  // @ `
+        KeyCode::BracketRight => &[CloseBracket], // \ ^
+        KeyCode::Backslash => &[Backslash],      // [ ]
+
+        // A row.
+        KeyCode::KeyA => &[A],
+        KeyCode::KeyS => &[S],
+        KeyCode::KeyD => &[D],
+        KeyCode::KeyF => &[F],
+        KeyCode::KeyG => &[G],
+        KeyCode::KeyH => &[H],
+        KeyCode::KeyJ => &[J],
+        KeyCode::KeyK => &[K],
+        KeyCode::KeyL => &[L],
+        KeyCode::Semicolon => &[Semicolon], // ; +
+        KeyCode::Quote => &[Quote],         // : *
+
+        // Y row, positional: host Z sits where the PMD has Y.
+        KeyCode::KeyZ => &[Y],
+        KeyCode::KeyX => &[X],
+        KeyCode::KeyC => &[C],
+        KeyCode::KeyV => &[V],
+        KeyCode::KeyB => &[B],
+        KeyCode::KeyN => &[N],
+        KeyCode::KeyM => &[M],
+        KeyCode::Comma => &[Comma],
+        KeyCode::Period => &[Period],
+        KeyCode::Slash => &[Slash],
+
+        // Digit row.
+        KeyCode::Digit1 => &[Digit1],
+        KeyCode::Digit2 => &[Digit2],
+        KeyCode::Digit3 => &[Digit3],
+        KeyCode::Digit4 => &[Digit4],
+        KeyCode::Digit5 => &[Digit5],
+        KeyCode::Digit6 => &[Digit6],
+        KeyCode::Digit7 => &[Digit7],
+        KeyCode::Digit8 => &[Digit8],
+        KeyCode::Digit9 => &[Digit9],
+        KeyCode::Digit0 => &[Digit0],
+        KeyCode::Minus => &[Minus],   // _ =
+        KeyCode::Equal => &[Equals], // { }
+
+        KeyCode::Space => &[Space],
+        KeyCode::Enter | KeyCode::NumpadEnter => &[Enter],
+        KeyCode::ShiftLeft | KeyCode::ShiftRight => &[Shift],
+        // STOP sits where the host has its Control keys.
+        KeyCode::Escape | KeyCode::ControlLeft | KeyCode::ControlRight => &[Stop],
+
+        // Control cluster: positional neighbors of the cluster grid.
+        KeyCode::Backspace => &[Backspace], // left arrow key
+        KeyCode::Insert => &[Insert],       // PTL/INS
+        KeyCode::Delete => &[Delete],
+        KeyCode::Tab => &[Cd],
+        KeyCode::Backquote => &[Wrk],
+        KeyCode::PageUp => &[Recall],
+        KeyCode::PageDown => &[ClrScr],
+        KeyCode::ArrowLeft => &[CursorLeft],
+        KeyCode::ArrowUp => &[CursorUp],     // the home-arrow key
+        KeyCode::ArrowDown => &[CursorDown], // the END key
+        KeyCode::ArrowRight => &[CursorRight],
+        KeyCode::Home => &[LineStart], // |<-
+        KeyCode::End => &[LineEnd],   // ->|
+
         // F1..F12 -> K0..K11 function keys.
-        KeyCode::F1 => Some(Key::K0),
-        KeyCode::F2 => Some(Key::K1),
-        KeyCode::F3 => Some(Key::K2),
-        KeyCode::F4 => Some(Key::K3),
-        KeyCode::F5 => Some(Key::K4),
-        KeyCode::F6 => Some(Key::K5),
-        KeyCode::F7 => Some(Key::K6),
-        KeyCode::F8 => Some(Key::K7),
-        KeyCode::F9 => Some(Key::K8),
-        KeyCode::F10 => Some(Key::K9),
-        KeyCode::F11 => Some(Key::K10),
-        KeyCode::F12 => Some(Key::K11),
-        _ => None,
+        KeyCode::F1 => &[K0],
+        KeyCode::F2 => &[K1],
+        KeyCode::F3 => &[K2],
+        KeyCode::F4 => &[K3],
+        KeyCode::F5 => &[K4],
+        KeyCode::F6 => &[K5],
+        KeyCode::F7 => &[K6],
+        KeyCode::F8 => &[K7],
+        KeyCode::F9 => &[K8],
+        KeyCode::F10 => &[K9],
+        KeyCode::F11 => &[K10],
+        KeyCode::F12 => &[K11],
+
+        // Numpad: duplicates of the main keys (the PMD 85 has none).
+        KeyCode::Numpad0 => &[Digit0],
+        KeyCode::Numpad1 => &[Digit1],
+        KeyCode::Numpad2 => &[Digit2],
+        KeyCode::Numpad3 => &[Digit3],
+        KeyCode::Numpad4 => &[Digit4],
+        KeyCode::Numpad5 => &[Digit5],
+        KeyCode::Numpad6 => &[Digit6],
+        KeyCode::Numpad7 => &[Digit7],
+        KeyCode::Numpad8 => &[Digit8],
+        KeyCode::Numpad9 => &[Digit9],
+        KeyCode::NumpadDecimal => &[Period],
+        KeyCode::NumpadDivide => &[Slash],
+        KeyCode::NumpadMultiply => &[Shift, Quote],    // *
+        KeyCode::NumpadAdd => &[Shift, Semicolon],     // +
+        KeyCode::NumpadSubtract => &[Shift, Digit0],  // -
+
+        _ => &[],
     }
 }
 
-/// Whether the event is a press or release (helper kept for readability).
-#[allow(dead_code)]
-pub fn is_press(event: &winit::event::KeyEvent) -> bool {
-    event.state == ElementState::Pressed
+/// Map a winit keyboard event to the emulated keys it presses.
+pub fn map(event: &KeyEvent) -> &'static [Key] {
+    let PhysicalKey::Code(code) = event.physical_key else {
+        return &[];
+    };
+    keys_for(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qwertz_swaps_y_and_z() {
+        assert_eq!(keys_for(KeyCode::KeyY), &[Key::Z]);
+        assert_eq!(keys_for(KeyCode::KeyZ), &[Key::Y]);
+        assert_eq!(keys_for(KeyCode::KeyQ), &[Key::Q]);
+        assert_eq!(keys_for(KeyCode::KeyP), &[Key::P]);
+    }
+
+    #[test]
+    fn punctuation_maps_to_the_keys_that_print_it() {
+        // Host position -> PMD key whose engraving matches (see the
+        // monitor decode table): ; + : * @ ` \ ^ _ = { } [ ].
+        assert_eq!(keys_for(KeyCode::Semicolon), &[Key::Semicolon]);
+        assert_eq!(keys_for(KeyCode::Quote), &[Key::Quote]);
+        assert_eq!(keys_for(KeyCode::BracketLeft), &[Key::OpenBracket]);
+        assert_eq!(keys_for(KeyCode::BracketRight), &[Key::CloseBracket]);
+        assert_eq!(keys_for(KeyCode::Backslash), &[Key::Backslash]);
+        assert_eq!(keys_for(KeyCode::Minus), &[Key::Minus]);
+        assert_eq!(keys_for(KeyCode::Equal), &[Key::Equals]);
+        assert_eq!(keys_for(KeyCode::Comma), &[Key::Comma]);
+        assert_eq!(keys_for(KeyCode::Period), &[Key::Period]);
+        assert_eq!(keys_for(KeyCode::Slash), &[Key::Slash]);
+    }
+
+    #[test]
+    fn numpad_duplicates_the_main_keys() {
+        assert_eq!(keys_for(KeyCode::Numpad7), &[Key::Digit7]);
+        assert_eq!(keys_for(KeyCode::Numpad0), &[Key::Digit0]);
+        assert_eq!(keys_for(KeyCode::NumpadDecimal), &[Key::Period]);
+        assert_eq!(keys_for(KeyCode::NumpadDivide), &[Key::Slash]);
+        assert_eq!(keys_for(KeyCode::NumpadEnter), &[Key::Enter]);
+    }
+
+    #[test]
+    fn numpad_operators_press_shift_combos() {
+        // + is SHIFT + the `; +` key, - SHIFT + `0`, * SHIFT + `: *`.
+        assert_eq!(keys_for(KeyCode::NumpadAdd), &[Key::Shift, Key::Semicolon]);
+        assert_eq!(keys_for(KeyCode::NumpadSubtract), &[Key::Shift, Key::Digit0]);
+        assert_eq!(keys_for(KeyCode::NumpadMultiply), &[Key::Shift, Key::Quote]);
+    }
+
+    #[test]
+    fn control_cluster_maps_positionally() {
+        assert_eq!(keys_for(KeyCode::Tab), &[Key::Cd]);
+        assert_eq!(keys_for(KeyCode::Backquote), &[Key::Wrk]);
+        assert_eq!(keys_for(KeyCode::PageUp), &[Key::Recall]);
+        assert_eq!(keys_for(KeyCode::PageDown), &[Key::ClrScr]);
+        assert_eq!(keys_for(KeyCode::Backspace), &[Key::Backspace]);
+        assert_eq!(keys_for(KeyCode::Home), &[Key::LineStart]);
+        assert_eq!(keys_for(KeyCode::End), &[Key::LineEnd]);
+    }
+
+    #[test]
+    fn unknown_keys_map_to_nothing() {
+        assert!(keys_for(KeyCode::NumLock).is_empty());
+    }
 }
