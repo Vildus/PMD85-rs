@@ -4,6 +4,7 @@
 //! later move into an `egui_dock` tree unchanged.
 
 pub mod controls;
+pub mod keyboard;
 pub mod screen;
 pub mod settings;
 pub mod status;
@@ -16,6 +17,8 @@ use crate::app::App;
 pub struct UiState {
     /// The settings window.
     pub settings_open: bool,
+    /// The keyboard layout reference window.
+    pub keyboard_open: bool,
     /// A configuration awaiting the "restart machine?" confirmation.
     pub confirm_reboot: Option<crate::app::MachineConfig>,
     /// The color-customization expander in the settings window.
@@ -31,6 +34,7 @@ pub fn draw(app: &mut App, ui: &mut egui::Ui) {
     status::draw(ui, app);
     screen::draw(ui, app);
     let ctx = ui.ctx().clone();
+    keyboard::draw(&ctx, app);
     settings::draw(&ctx, app);
     draw_notifications(&ctx, app);
 }
@@ -117,6 +121,10 @@ mod tests {
             (
                 "settings-open",
                 Box::new(|a| a.ui.settings_open = true),
+            ),
+            (
+                "keyboard-open",
+                Box::new(|a| a.ui.keyboard_open = true),
             ),
             (
                 "settings-changed",
@@ -306,6 +314,50 @@ mod tests {
         assert!(
             right_edge <= screen.x + 1.0,
             "settings window overflows the screen (right edge {:.0} > {:.0})",
+            right_edge,
+            screen.x
+        );
+    }
+
+    #[test]
+    fn keyboard_window_paints_within_the_screen() {
+        let mut app = test_app();
+        app.ui.keyboard_open = true;
+        let ctx = app.ctx.clone();
+        let screen = egui::vec2(1024.0, 768.0);
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
+            ..Default::default()
+        };
+        let mut right_edge: f32 = 0.0;
+        for _ in 0..10 {
+            let out = ctx.run_ui(raw.clone(), |ui| {
+                crate::ui::keyboard::draw(ui.ctx(), &mut app);
+            });
+            if let Some(bbox) = out
+                .shapes
+                .iter()
+                .map(|s| s.shape.visual_bounding_rect())
+                .filter(|r| r.is_finite() && r.width() > 0.0 && r.height() > 0.0)
+                .fold(None::<egui::Rect>, |acc, r| {
+                    Some(acc.map_or(r, |a| a.union(r)))
+                })
+            {
+                right_edge = right_edge.max(bbox.right());
+            }
+            out.drop_without_applying_deltas();
+        }
+        assert!(right_edge > 100.0, "keyboard window never painted");
+        // The window must open at (at least) the content size: the
+        // full layout is painted, not squeezed into a narrow
+        // scrollable strip.
+        assert!(
+            right_edge > 750.0,
+            "keyboard window too narrow (right edge {right_edge:.0})"
+        );
+        assert!(
+            right_edge <= screen.x + 1.0,
+            "keyboard window overflows the screen (right edge {:.0} > {:.0})",
             right_edge,
             screen.x
         );

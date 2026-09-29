@@ -215,6 +215,12 @@ impl Keyboard {
         }
     }
 
+    /// Whether a key is currently held down (for UI feedback).
+    pub fn is_pressed(&self, key: Key) -> bool {
+        let (col, bit) = matrix_pos(key);
+        self.matrix[col] & bit == 0
+    }
+
     /// Read the row lines for the given scan column (motherboard 8255
     /// port B): the selected column ANDed with the special Shift/Stop
     /// column 15.
@@ -244,6 +250,18 @@ mod tests {
         assert_eq!(kb.read_rows(1), 0xFF);
         kb.set_key(Key::A, false);
         assert_eq!(kb.read_rows(0), 0xFF);
+    }
+
+    #[test]
+    fn is_pressed_tracks_set_key() {
+        let mut kb = Keyboard::new();
+        assert!(!kb.is_pressed(Key::Space));
+        kb.set_key(Key::Space, true);
+        assert!(kb.is_pressed(Key::Space));
+        // A different key sharing the matrix column is not affected.
+        assert!(!kb.is_pressed(Key::A));
+        kb.set_key(Key::Space, false);
+        assert!(!kb.is_pressed(Key::Space));
     }
 
     #[test]

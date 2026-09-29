@@ -106,12 +106,16 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Settings gear.
-                    if ui
-                        .button(egui::RichText::new(icon::GEAR).size(14.0))
-                        .on_hover_text("Settings")
-                        .clicked()
-                    {
+                    let gear = egui::Button::new(egui::RichText::new(icon::GEAR).size(14.0))
+                        .selected(app.ui.settings_open);
+                    if ui.add(gear).on_hover_text("Settings").clicked() {
                         app.ui.settings_open = !app.ui.settings_open;
+                    }
+                    // Keyboard layout reference.
+                    let kbd = egui::Button::new(egui::RichText::new(icon::KEYBOARD).size(14.0))
+                        .selected(app.ui.keyboard_open);
+                    if ui.add(kbd).on_hover_text("Keyboard layout").clicked() {
+                        app.ui.keyboard_open = !app.ui.keyboard_open;
                     }
                     // Machine summary on the right.
                     let module = app.config.rom_module.as_deref().unwrap_or("no module");
