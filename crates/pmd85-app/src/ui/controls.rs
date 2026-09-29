@@ -117,6 +117,14 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                     if ui.add(kbd).on_hover_text("Keyboard layout").clicked() {
                         app.ui.keyboard_open = !app.ui.keyboard_open;
                     }
+                    // Cassette tape editor.
+                    let tape = egui::Button::new(
+                        egui::RichText::new(icon::CASSETTE_TAPE).size(14.0),
+                    )
+                    .selected(app.ui.tape_open);
+                    if ui.add(tape).on_hover_text("Cassette tape").clicked() {
+                        app.ui.tape_open = !app.ui.tape_open;
+                    }
                     // Machine summary on the right.
                     let module = app.config.rom_module.as_deref().unwrap_or("no module");
                     let summary = if running {

@@ -24,6 +24,10 @@ pub struct AppSettings {
     pub theme: String,
     /// Speed multiplier (1.0 = real time).
     pub speed: f64,
+    /// Play the tape data tone through the speaker (tape monitor).
+    pub tape_monitor: bool,
+    /// Stop tape playback at the next file header.
+    pub tape_autostop: bool,
 }
 
 impl Default for AppSettings {
@@ -34,6 +38,8 @@ impl Default for AppSettings {
             mute: false,
             theme: crate::ui::theme::DEFAULT_THEME.to_string(),
             speed: 1.0,
+            tape_monitor: false,
+            tape_autostop: true,
         }
     }
 }
@@ -98,6 +104,8 @@ mod tests {
         assert_eq!(Model::from_str_loose(&s.model), Some(Model::Pmd853));
         assert_eq!(s.speed, 1.0);
         assert!(!s.mute);
+        assert!(!s.tape_monitor);
+        assert!(s.tape_autostop);
     }
 
     #[test]
@@ -109,6 +117,8 @@ mod tests {
             mute: true,
             theme: "Amber Terminal".into(),
             speed: 5.0,
+            tape_monitor: true,
+            tape_autostop: false,
         };
         s.save(&dir);
         let loaded = AppSettings::load(&dir);
@@ -138,5 +148,8 @@ mod tests {
         assert!(s.mute);
         assert_eq!(Model::from_str_loose(&s.model), Some(Model::Pmd853));
         assert_eq!(s.speed, 1.0);
+        // New settings keep their defaults when absent from the file.
+        assert!(!s.tape_monitor);
+        assert!(s.tape_autostop);
     }
 }

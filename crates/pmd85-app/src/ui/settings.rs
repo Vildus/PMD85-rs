@@ -188,6 +188,14 @@ fn draw_settings_window(ctx: &egui::Context, app: &mut App) {
             if app.settings.mute != mute_before {
                 app.set_mute(app.settings.mute);
             }
+            let monitor_before = app.settings.tape_monitor;
+            ui.checkbox(
+                &mut app.settings.tape_monitor,
+                "Tape data tone (monitor what the cassette interface hears)",
+            );
+            if app.settings.tape_monitor != monitor_before {
+                app.set_tape_monitor(app.settings.tape_monitor);
+            }
 
             ui.separator();
 

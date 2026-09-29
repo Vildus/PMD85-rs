@@ -13,6 +13,7 @@ use crate::chips::usart8251::I8251;
 use crate::cpu::{Bus, Cpu};
 use crate::keyboard::Keyboard;
 use crate::model::Model;
+use crate::tapedeck::TapeDeck;
 
 /// CPU clock: Tesla MHB8080A at 2.048 MHz.
 pub const CPU_CLOCK_HZ: u64 = 2_048_000;
@@ -36,6 +37,8 @@ pub struct MachineBus {
     ppi_rom: I8255,
     pub pit: I8253,
     pub uart: I8251,
+    /// The cassette deck, wired to the 8251 (DSR in, TX out).
+    pub tape: TapeDeck,
     /// Speaker level (combined PC2/PC0/PC1 sound circuit, see
     /// [`speaker_level_from`]).
     speaker_level: bool,
@@ -65,6 +68,7 @@ impl MachineBus {
             ppi_rom: I8255::new(),
             pit: I8253::new(),
             uart: I8251::new(),
+            tape: TapeDeck::new(),
             speaker_level: false,
             led: false,
             speaker_edges: SpeakerEdgeLog::default(),
@@ -86,6 +90,7 @@ impl MachineBus {
         self.ppi_rom.reset();
         self.pit.reset();
         self.uart.reset();
+        self.tape.hard_reset(&mut self.uart);
         self.speaker_level = false;
         self.led = false;
         self.speaker_edges.clear();
@@ -141,6 +146,16 @@ impl MachineBus {
         self.ppi_system.outputs[0]
     }
 
+    /// Stop tape playback (convenience for the frontend).
+    pub fn tape_stop(&mut self) {
+        self.tape.stop(&mut self.uart);
+    }
+
+    /// Start feeding a tape block (convenience for the frontend).
+    pub fn tape_play(&mut self, data: &[u8], head: bool, on_play: bool) {
+        self.tape.play_block(data, head, on_play);
+    }
+
     /// Emulated CPU cycles executed since power-on.
     pub fn total_cycles(&self) -> u64 {
         self.total_cycles
@@ -170,6 +185,9 @@ impl MachineBus {
         if self.total_cycles / CPU_CLOCK_HZ != seconds_before {
             self.pit.tick(2, true);
         }
+        // The cassette deck runs off the CPU clock (its half-clock is
+        // 853 cycles) and drives the 8251 DSR line.
+        self.tape.tick(cycles, &mut self.uart);
     }
 
     /// True if a ROM module is connected.
@@ -250,7 +268,15 @@ impl MachineBus {
             0x0C if port & 0x80 == 0 => {
                 // I/O board interfaces
                 match port & 0x70 {
-                    0x10 => self.uart.write(port as u32 & 1, data),
+                    0x10 => {
+                        let reg = port as u32 & 1;
+                        self.uart.write(reg, data);
+                        // Data writes to the transmitter are sniffed by
+                        // the tape deck recorder (and paced by it).
+                        if reg == 0 {
+                            self.tape.on_tx_byte(data, &mut self.uart);
+                        }
+                    }
                     0x40 => self.ppi_gpio.write(Port::from_index(reg), data),
                     0x50 => self.pit.write(port as u32 & 3, data),
                     0x70 => self.ppi_ims2.write(Port::from_index(reg), data),
@@ -500,6 +526,10 @@ mod tests {
         m.bus.io_write(0x1D, 0x27); // command
         m.bus.io_write(0x1C, 0x42);
         assert_eq!(m.bus.uart.tx_log, vec![0x42]);
+        // The tape deck paces the transmitter for one byte time
+        // (22 half-clocks at 853 cycles); let it elapse.
+        assert_eq!(m.bus.io_read(0x1D) & 0x05, 0, "transmitter busy");
+        m.bus.advance_time(22 * 853 + 1);
         assert_eq!(m.bus.io_read(0x1D) & 0x05, 0x05);
     }
 

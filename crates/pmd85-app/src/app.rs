@@ -3,10 +3,11 @@
 //! draws it), windowing-agnostic (main.rs drives it).
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use pmd85_core::machine::CPU_CLOCK_HZ;
+use pmd85_core::tape::{self, Tape};
 use pmd85_core::vram::{self, ColorProfile, HEIGHT, WIDTH};
 use pmd85_core::{Machine, Model};
 
@@ -61,6 +62,309 @@ impl Default for SpeedState {
     }
 }
 
+/// A file on the tape: its block (the header + body pair) plus any
+/// headerless continuation blocks that follow it (pictures, saved
+/// positions).
+#[derive(Clone, Debug)]
+pub struct TapeFile {
+    /// Index of the file's block in `Tape::blocks`. The block has no
+    /// header for a headerless run with no file ahead of it (e.g. a
+    /// truncated tape).
+    pub block: usize,
+    /// Headerless continuation block indices, in tape order.
+    pub continuations: Vec<usize>,
+}
+
+impl TapeFile {
+    /// Contiguous block-index span `[start, start + len)` of the file.
+    fn span(&self) -> (usize, usize) {
+        let end = self.continuations.last().copied().unwrap_or(self.block);
+        (self.block, end - self.block + 1)
+    }
+}
+
+/// Which half of a block a queue entry feeds.
+#[derive(Clone, Copy, Debug)]
+enum FeedPart {
+    Header,
+    Body,
+}
+
+/// One playback session: blocks (and block halves) still to feed,
+/// in order.
+#[derive(Debug)]
+struct PlaySession {
+    queue: VecDeque<(usize, FeedPart)>,
+    /// False until the first block has been fed.
+    started: bool,
+}
+
+/// Cassette tape editor and transport state: the tape image being
+/// edited, the selected file and the playback session feeding the
+/// machine. Also harvests blocks the machine records.
+#[derive(Debug)]
+pub struct TapeState {
+    /// The tape image being edited (empty = no tape).
+    pub tape: Tape,
+    /// File the tape was loaded from / was last saved to.
+    pub path: Option<PathBuf>,
+    /// Unsaved edits since the last load/save.
+    pub dirty: bool,
+    /// Selected file, an index into [`TapeState::files`].
+    pub selected: Option<usize>,
+    /// Stop playback after the selected file's blocks (at the next
+    /// file header); when off, the rest of the tape follows.
+    pub auto_stop: bool,
+    /// Active playback session.
+    play: Option<PlaySession>,
+    /// The recorder was active at the previous pump (edge detector
+    /// for harvesting the recorded stream).
+    was_recording: bool,
+}
+
+impl Default for TapeState {
+    fn default() -> Self {
+        TapeState {
+            tape: Tape::default(),
+            path: None,
+            dirty: false,
+            selected: None,
+            auto_stop: true,
+            play: None,
+            was_recording: false,
+        }
+    }
+}
+
+impl TapeState {
+    /// The tape's blocks grouped into files, in tape order.
+    pub fn files(&self) -> Vec<TapeFile> {
+        let mut files: Vec<TapeFile> = Vec::new();
+        for (i, block) in self.tape.blocks.iter().enumerate() {
+            if block.header.is_some() || files.is_empty() {
+                // A new file, or a headerless run at the tape start
+                // with no file ahead of it.
+                files.push(TapeFile {
+                    block: i,
+                    continuations: Vec::new(),
+                });
+            } else {
+                files.last_mut().unwrap().continuations.push(i);
+            }
+        }
+        files
+    }
+
+    /// Load a `.ptp`/`.pmd` image, replacing the current tape. The
+    /// caller is responsible for stopping playback first.
+    pub fn open(&mut self, path: &Path) -> Result<(), String> {
+        let tape = tape::load(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        self.play = None;
+        self.tape = tape;
+        self.path = Some(path.to_path_buf());
+        self.dirty = false;
+        self.selected = None;
+        Ok(())
+    }
+
+    /// Start a fresh empty tape. The caller stops playback first.
+    pub fn clear(&mut self) {
+        self.play = None;
+        self.tape = Tape::default();
+        self.path = None;
+        self.dirty = false;
+        self.selected = None;
+    }
+
+    /// Save to the tape's current path.
+    pub fn save(&mut self) -> Result<(), String> {
+        let path = self.path.clone().ok_or("no file chosen yet")?;
+        self.save_as(&path)
+    }
+
+    /// Save the tape as a PTP image to `path`.
+    pub fn save_as(&mut self, path: &Path) -> Result<(), String> {
+        tape::save(path, &self.tape).map_err(|e| format!("{}: {e}", path.display()))?;
+        self.path = Some(path.to_path_buf());
+        self.dirty = false;
+        Ok(())
+    }
+
+    /// Append a new file built from raw content (import). Returns
+    /// the new file's index.
+    pub fn import_file(
+        &mut self,
+        number: u8,
+        block_type: u8,
+        name: &str,
+        start: u16,
+        content: &[u8],
+    ) -> Result<usize, String> {
+        let block = tape::make_file(number, block_type, name, start, content)?;
+        self.tape.blocks.push(block);
+        self.dirty = true;
+        let index = self.files().len() - 1;
+        self.selected = Some(index);
+        Ok(index)
+    }
+
+    /// The loadable content of a file (its block's body payload).
+    pub fn export_file(&self, file: usize) -> Option<Vec<u8>> {
+        let files = self.files();
+        Some(self.tape.blocks.get(files.get(file)?.block)?.content().to_vec())
+    }
+
+    /// Delete a file: its block and continuation blocks.
+    pub fn delete_file(&mut self, file: usize) {
+        let files = self.files();
+        let Some(f) = files.get(file) else {
+            return;
+        };
+        let (start, len) = f.span();
+        for i in (start..start + len).rev() {
+            self.tape.blocks.remove(i);
+        }
+        self.dirty = true;
+        let count = self.files().len();
+        self.selected = self.selected.map(|s| s.min(count.saturating_sub(1)));
+    }
+
+    /// Move a file one place up (`delta < 0`) or down the tape.
+    pub fn move_file(&mut self, file: usize, delta: i32) {
+        let delta = delta.signum();
+        let files = self.files();
+        let target = file as i64 + delta as i64;
+        if !((0..files.len() as i64).contains(&target)) {
+            return;
+        }
+        let (m_start, m_len) = files[file].span();
+        let (o_start, o_len) = files[target as usize].span();
+        let moved: Vec<_> = self.tape.blocks.drain(m_start..m_start + m_len).collect();
+        // After the drain the neighbour below shifted up by m_len;
+        // the neighbour above did not move.
+        let insert_at = if delta > 0 {
+            o_start + o_len - m_len
+        } else {
+            o_start
+        };
+        self.tape
+            .blocks
+            .splice(insert_at..insert_at, moved);
+        self.dirty = true;
+        self.selected = Some(target as usize);
+    }
+
+    /// Request playback of `file`: its header, body and continuation
+    /// blocks; with `auto_stop` off the rest of the tape follows.
+    /// The first block is fed on the next [`TapeState::pump`].
+    pub fn request_play(&mut self, file: usize) {
+        let files = self.files();
+        let Some(f) = files.get(file) else {
+            return;
+        };
+        let mut queue: VecDeque<(usize, FeedPart)> = VecDeque::new();
+        let has_header = self.tape.blocks[f.block].header.is_some();
+        if has_header {
+            queue.push_back((f.block, FeedPart::Header));
+        }
+        queue.push_back((f.block, FeedPart::Body));
+        for &c in &f.continuations {
+            queue.push_back((c, FeedPart::Body));
+        }
+        if !self.auto_stop {
+            let (_, len) = f.span();
+            for i in f.block + len..self.tape.blocks.len() {
+                if self.tape.blocks[i].header.is_some() {
+                    queue.push_back((i, FeedPart::Header));
+                }
+                queue.push_back((i, FeedPart::Body));
+            }
+        }
+        if queue.is_empty() {
+            return;
+        }
+        self.play = Some(PlaySession {
+            queue,
+            started: false,
+        });
+        self.selected = Some(file);
+    }
+
+    /// Stop playback (nothing more is fed to the machine).
+    pub fn stop_playback(&mut self, machine: &mut Machine) {
+        self.play = None;
+        machine.bus.tape_stop();
+    }
+
+    /// Whether a playback session is active.
+    pub fn is_playing(&self) -> bool {
+        self.play.is_some()
+    }
+
+    /// Feed the machine from the playback session and harvest
+    /// recorded blocks. Called once per rendered frame; returns a
+    /// user notification when something was recorded.
+    pub fn pump(&mut self, machine: &mut Machine) -> Option<String> {
+        // A fresh session feeds its first block immediately.
+        if let Some(session) = self.play.as_mut() {
+            if !session.started {
+                session.started = true;
+                if let Some((idx, part)) = session.queue.pop_front() {
+                    self.feed(machine, idx, part, true);
+                }
+            }
+        }
+
+        // A finished block advances to the next one; an empty block
+        // finishes immediately, hence the loop.
+        while machine.bus.tape.take_block_finished() {
+            let next = self.play.as_mut().and_then(|s| s.queue.pop_front());
+            match next {
+                Some((idx, part)) => self.feed(machine, idx, part, false),
+                None => {
+                    self.play = None;
+                    break;
+                }
+            }
+        }
+
+        // A session the machine reset out from under us.
+        if self.play.is_some() && !machine.bus.tape.is_playing() {
+            self.play = None;
+        }
+
+        // Recording: harvest the stream once the recorder goes quiet.
+        let recording = machine.bus.tape.is_recording();
+        let mut notification = None;
+        if self.was_recording && !recording {
+            let recorded = machine.bus.tape.take_recorded();
+            let before = self.tape.blocks.len();
+            self.tape.append_ptp_stream(&recorded);
+            let added = self.tape.blocks.len() - before;
+            if added > 0 {
+                self.dirty = true;
+                notification = Some(format!(
+                    "Tape: recorded {added} block{} from the machine",
+                    if added == 1 { "" } else { "s" }
+                ));
+            }
+        }
+        self.was_recording = recording;
+        notification
+    }
+
+    /// Feed one half of a tape block to the machine's deck.
+    fn feed(&self, machine: &mut Machine, idx: usize, part: FeedPart, on_play: bool) {
+        let block = &self.tape.blocks[idx];
+        match part {
+            FeedPart::Header => {
+                machine.bus.tape_play(&block.header_bytes, true, on_play)
+            }
+            FeedPart::Body => machine.bus.tape_play(&block.body_bytes, false, on_play),
+        }
+    }
+}
+
 /// The whole application state, minus windowing.
 pub struct App {
     pub ctx: egui::Context,
@@ -79,6 +383,9 @@ pub struct App {
     pub running: bool,
     pub speed: SpeedState,
     pub pacer: Pacer,
+
+    /// Cassette tape editor/deck state.
+    pub tape: TapeState,
 
     /// Emulated frames since the last machine (re)start.
     pub frames_done: u64,
@@ -153,6 +460,10 @@ impl App {
             },
             pacer: Pacer::new(),
             frames_done: 0,
+            tape: TapeState {
+                auto_stop: settings.tape_autostop,
+                ..TapeState::default()
+            },
             ui: UiState::default(),
             settings,
             themes: Vec::new(),
@@ -296,6 +607,51 @@ impl App {
         self.persist();
     }
 
+    // ----- tape -----
+
+    /// Open a tape image in the editor, stopping playback first.
+    /// Parse warnings become notifications.
+    pub fn open_tape(&mut self, path: &std::path::Path) -> Result<(), String> {
+        self.tape.stop_playback(&mut self.machine);
+        self.tape.open(path)?;
+        let warnings = self.tape.tape.warnings.join("; ");
+        if !warnings.is_empty() {
+            self.notify(format!("Tape: {warnings}"));
+        }
+        Ok(())
+    }
+
+    /// Start a fresh empty tape, stopping playback first.
+    pub fn new_tape(&mut self) {
+        self.tape.stop_playback(&mut self.machine);
+        self.tape.clear();
+    }
+
+    /// Begin playing tape file `file` into the machine (the first
+    /// block is fed immediately).
+    pub fn play_tape_file(&mut self, file: usize) {
+        self.tape.request_play(file);
+        let _ = self.tape.pump(&mut self.machine);
+    }
+
+    /// Stop tape playback.
+    pub fn stop_tape_playback(&mut self) {
+        self.tape.stop_playback(&mut self.machine);
+    }
+
+    /// Toggle the auto-stop-at-next-header behavior and persist it.
+    pub fn set_tape_autostop(&mut self, auto_stop: bool) {
+        self.tape.auto_stop = auto_stop;
+        self.settings.tape_autostop = auto_stop;
+        self.persist();
+    }
+
+    /// Toggle the tape data-tone monitor and persist it.
+    pub fn set_tape_monitor(&mut self, on: bool) {
+        self.settings.tape_monitor = on;
+        self.persist();
+    }
+
     // ----- emulation -----
 
     /// Run the emulation for this render frame, feed the speaker, and
@@ -325,12 +681,25 @@ impl App {
         };
         self.frames_done += frames;
 
-        // Speaker: only at exactly 1x real time; otherwise drain (the
-        // edge log is bounded either way).
+        // Tape: advance playback into the machine and harvest
+        // recorded blocks (also while paused: the deck state machine
+        // only moves with the machine).
+        if let Some(message) = self.tape.pump(&mut self.machine) {
+            self.notify(message);
+        }
+
+        // Speaker (and the tape data-tone monitor, when enabled):
+        // only at exactly 1x real time; otherwise drain (the edge logs
+        // are bounded either way).
         let edges = self.machine.take_speaker_edges();
+        let tape_edges = self.machine.bus.tape.take_monitor_edges();
         if self.wants_audio() {
             if let Some(audio) = &mut self.audio {
-                audio.submit(edges, self.machine.bus.total_cycles());
+                if self.settings.tape_monitor {
+                    audio.submit_mixed(edges, tape_edges, self.machine.bus.total_cycles());
+                } else {
+                    audio.submit(edges, self.machine.bus.total_cycles());
+                }
             }
         }
 

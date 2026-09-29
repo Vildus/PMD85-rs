@@ -18,6 +18,31 @@ const BUFFER_SECONDS: f32 = 0.15;
 /// Output volume (the square wave is loud at full scale).
 const GAIN: f32 = 0.25;
 
+/// Tape data-tone volume, mixed under the speaker (a quiet monitor
+/// of what the cassette interface hears).
+const TAPE_GAIN: f32 = 0.06;
+
+/// Mix one frame of speaker and tape-monitor samples into output
+/// samples: the expander emits +1/-1 for high/low; each maps to a
+/// positive pulse at its gain and silence at rest, so idle output
+/// has no DC offset.
+fn mix_samples(speaker: &[f32], tape: &[f32], out: &mut Vec<f32>) {
+    out.clear();
+    out.reserve(speaker.len().max(tape.len()));
+    for i in 0..speaker.len().max(tape.len()) {
+        let spk = speaker.get(i).copied().unwrap_or(0.0) > 0.0;
+        let tape = tape.get(i).copied().unwrap_or(0.0) > 0.0;
+        let mut v = 0.0;
+        if spk {
+            v += GAIN;
+        }
+        if tape {
+            v += TAPE_GAIN;
+        }
+        out.push(v);
+    }
+}
+
 /// Fixed-capacity ring of mono samples shared with the audio thread.
 struct SharedRing {
     buf: Vec<f32>,
@@ -70,9 +95,12 @@ impl SharedRing {
     }
 }
 
-/// Speaker output for the app: expander plus a live cpal stream.
+/// Speaker output for the app: expanders plus a live cpal stream.
 pub struct SpeakerOut {
     expander: EdgeExpander,
+    /// The cassette data tone, mixed under the speaker at low volume
+    /// (see [`SpeakerOut::submit_mixed`]).
+    tape_expander: EdgeExpander,
     /// The stream's sample rate (kept to rebuild the expander on
     /// [`SpeakerOut::resync`]).
     sample_rate: u32,
@@ -80,8 +108,10 @@ pub struct SpeakerOut {
     /// Kept alive for the lifetime of the app: dropping the stream
     /// would stop the audio (hence the underscore).
     _stream: cpal::Stream,
-    /// Per-frame scratch buffer handed to the ring.
+    /// Per-frame scratch buffers handed to the ring.
     scratch: Vec<f32>,
+    tape_scratch: Vec<f32>,
+    mixed: Vec<f32>,
 }
 
 impl SpeakerOut {
@@ -143,10 +173,13 @@ impl SpeakerOut {
         );
         Some(SpeakerOut {
             expander: EdgeExpander::new(sample_rate, 0, false),
+            tape_expander: EdgeExpander::new(sample_rate, 0, false),
             sample_rate,
             ring,
             _stream: stream,
             scratch: Vec::new(),
+            tape_scratch: Vec::new(),
+            mixed: Vec::new(),
         })
     }
 
@@ -159,26 +192,38 @@ impl SpeakerOut {
     /// forever.
     pub fn resync(&mut self) {
         self.expander = EdgeExpander::new(self.sample_rate, 0, false);
+        self.tape_expander = EdgeExpander::new(self.sample_rate, 0, false);
         if let Ok(mut ring) = self.ring.lock() {
             ring.clear();
         }
     }
 
-    /// Feed a frame's worth of edges (from `Machine::take_speaker_edges`)
-    /// and render everything up to the machine's current cycle count into
-    /// the output buffer.
+    /// Feed a frame's worth of speaker edges (from
+    /// `Machine::take_speaker_edges`) and render everything up to the
+    /// machine's current cycle count into the output buffer.
     pub fn submit(&mut self, edges: Vec<SpeakerEdge>, until_cycle: u64) {
-        self.expander.push_edges(edges);
+        self.submit_mixed(edges, Vec::new(), until_cycle);
+    }
+
+    /// Feed a frame's worth of speaker and tape-monitor edges (from
+    /// the deck's `take_monitor_edges`) and render both, the tape
+    /// data tone mixed under the speaker at low volume.
+    pub fn submit_mixed(
+        &mut self,
+        speaker: Vec<SpeakerEdge>,
+        tape: Vec<SpeakerEdge>,
+        until_cycle: u64,
+    ) {
+        self.expander.push_edges(speaker);
+        self.tape_expander.push_edges(tape);
         self.scratch.clear();
         self.expander.render_until(until_cycle, &mut self.scratch);
-        // The expander emits +1/-1 for speaker high/low; map that to a
-        // positive pulse at GAIN and silence when at rest, so idle output
-        // has no DC offset.
+        self.tape_scratch.clear();
+        self.tape_expander
+            .render_until(until_cycle, &mut self.tape_scratch);
+        mix_samples(&self.scratch, &self.tape_scratch, &mut self.mixed);
         if let Ok(mut ring) = self.ring.lock() {
-            for s in &mut self.scratch {
-                *s = if *s > 0.0 { GAIN } else { 0.0 };
-            }
-            ring.push(&self.scratch);
+            ring.push(&self.mixed);
         }
     }
 }
@@ -220,6 +265,29 @@ mod tests {
             assert_eq!(r.pop(), Some((round + 2) as f32));
         }
     }
+
+    #[test]
+    fn tape_monitor_mixes_under_the_speaker() {
+        // Speaker high alone: GAIN. Tape tone alone: TAPE_GAIN. Both
+        // active: summed. Low/rest: silence.
+        let mut out = Vec::new();
+        mix_samples(&[1.0, -1.0, 1.0], &[], &mut out);
+        assert_eq!(out, vec![GAIN, 0.0, GAIN]);
+
+        mix_samples(&[], &[1.0, 1.0], &mut out);
+        assert_eq!(out, vec![TAPE_GAIN, TAPE_GAIN]);
+
+        mix_samples(&[1.0, 1.0], &[1.0, -1.0], &mut out);
+        assert_eq!(out, vec![GAIN + TAPE_GAIN, GAIN]);
+
+        // Speaker stream longer than the tape stream: the tail keeps
+        // the speaker level alone.
+        mix_samples(&[-1.0, 1.0, 1.0], &[1.0], &mut out);
+        assert_eq!(out, vec![TAPE_GAIN, GAIN, GAIN]);
+    }
+
+    /// The tape tone must be quiet under the speaker.
+    const _: () = assert!(TAPE_GAIN < GAIN);
 
     #[test]
     fn expander_silenced_by_cycle_origin_restart() {

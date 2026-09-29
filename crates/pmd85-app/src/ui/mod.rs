@@ -8,6 +8,7 @@ pub mod keyboard;
 pub mod screen;
 pub mod settings;
 pub mod status;
+pub mod tape;
 pub mod theme;
 
 use crate::app::App;
@@ -19,6 +20,10 @@ pub struct UiState {
     pub settings_open: bool,
     /// The keyboard layout reference window.
     pub keyboard_open: bool,
+    /// The cassette tape editor window.
+    pub tape_open: bool,
+    /// Metadata entry form for a pending tape import.
+    pub tape_import: Option<crate::ui::tape::ImportDraft>,
     /// A configuration awaiting the "restart machine?" confirmation.
     pub confirm_reboot: Option<crate::app::MachineConfig>,
     /// The color-customization expander in the settings window.
@@ -40,6 +45,7 @@ pub fn draw(app: &mut App, ui: &mut egui::Ui) {
     screen::draw(ui, app);
     let ctx = ui.ctx().clone();
     keyboard::draw(&ctx, app);
+    tape::draw(&ctx, app);
     settings::draw(&ctx, app);
     draw_notifications(&ctx, app);
 }
@@ -152,6 +158,64 @@ mod tests {
             (
                 "error-notification",
                 Box::new(|a| a.notify("test error")),
+            ),
+            (
+                "tape-open",
+                Box::new(|a| a.ui.tape_open = true),
+            ),
+            (
+                "tape-with-file",
+                Box::new(|a| {
+                    a.ui.tape_open = true;
+                    let block = pmd85_core::tape::make_file(
+                        0,
+                        b'?',
+                        "TESTFILE",
+                        0x1000,
+                        &[1u8, 2, 3, 4],
+                    )
+                    .unwrap();
+                    a.tape.tape.blocks.push(block);
+                    a.tape.selected = Some(0);
+                }),
+            ),
+            (
+                "tape-playing",
+                Box::new(|a| {
+                    a.ui.tape_open = true;
+                    let block = pmd85_core::tape::make_file(
+                        0,
+                        b'?',
+                        "TESTFILE",
+                        0x1000,
+                        &[1u8, 2, 3, 4],
+                    )
+                    .unwrap();
+                    a.tape.tape.blocks.push(block);
+                    a.play_tape_file(0);
+                }),
+            ),
+            (
+                "tape-import-form",
+                Box::new(|a| {
+                    a.ui.tape_open = true;
+                    let block = pmd85_core::tape::make_file(
+                        0,
+                        b'?',
+                        "TESTFILE",
+                        0x1000,
+                        &[1u8, 2, 3, 4],
+                    )
+                    .unwrap();
+                    a.tape.tape.blocks.push(block);
+                    a.ui.tape_import = Some(crate::ui::tape::ImportDraft {
+                        path: "raw.bin".into(),
+                        number: "01".into(),
+                        block_type: "?".into(),
+                        name: "RAW".into(),
+                        start: "1000".into(),
+                    });
+                }),
             ),
         ];
         for (name, setup) in cases {
@@ -383,5 +447,206 @@ mod tests {
         app.set_mute(false);
         app.set_running(false);
         assert!(!app.wants_audio());
+    }
+
+    // ----- tape -----
+
+    use pmd85_core::keyboard::Key;
+    use pmd85_core::tape::{self, Tape};
+
+    /// Press and release an emulated key (16 frames, like a human
+    /// typist the monitor can follow), keeping the tape deck pumped.
+    fn type_key(app: &mut App, k: Key) {
+        app.machine.bus.keyboard.set_key(k, true);
+        for _ in 0..8 {
+            app.machine.step_frame();
+            let _ = app.tape.pump(&mut app.machine);
+        }
+        app.machine.bus.keyboard.set_key(k, false);
+        for _ in 0..8 {
+            app.machine.step_frame();
+            let _ = app.tape.pump(&mut app.machine);
+        }
+    }
+
+    /// Type a command on the machine keyboard and press Enter.
+    fn type_command(app: &mut App, keys: &[Key]) {
+        for &k in keys {
+            type_key(app, k);
+        }
+    }
+
+    /// Name of tape file `file` (for assertions).
+    fn file_name(app: &App, file: usize) -> String {
+        let files = app.tape.files();
+        app.tape.tape.blocks[files[file].block]
+            .header
+            .as_ref()
+            .unwrap()
+            .name_str()
+    }
+
+    #[test]
+    fn tape_editor_roundtrip() {
+        let mut app = test_app();
+        let dir = std::env::temp_dir().join(format!("pmd85-tape-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let c1 = vec![0x76u8, 1, 2, 3];
+        let c2 = vec![9u8, 8, 7, 6, 5];
+        let mut image = Tape::default();
+        image
+            .blocks
+            .push(tape::make_file(0, b'?', "FIRST", 0x1000, &c1).unwrap());
+        image
+            .blocks
+            .push(tape::make_file(1, b'?', "SECOND", 0x2000, &c2).unwrap());
+        let path = dir.join("tape.ptp");
+        tape::save(&path, &image).unwrap();
+
+        app.open_tape(&path).unwrap();
+        assert_eq!(app.tape.files().len(), 2);
+        assert!(!app.tape.dirty);
+        assert_eq!(app.tape.path.as_deref(), Some(path.as_path()));
+        assert_eq!(app.tape.export_file(0).unwrap(), c1);
+        assert_eq!(app.tape.export_file(1).unwrap(), c2);
+
+        // A headerless block appended after SECOND groups beneath it.
+        let cont = vec![0xAAu8, 0xBB];
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&(cont.len() as u16).to_le_bytes());
+        stream.extend_from_slice(&cont);
+        app.tape.tape.append_ptp_stream(&stream);
+        app.tape.dirty = true; // appending is an edit
+        let files = app.tape.files();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[1].continuations.len(), 1, "continuation block");
+        app.tape.dirty = false; // not under test below
+
+        // Move SECOND (with its continuation) up.
+        app.tape.move_file(1, -1);
+        assert_eq!(file_name(&app, 0), "SECOND");
+        assert_eq!(file_name(&app, 1), "FIRST");
+        assert_eq!(
+            app.tape.files()[0].continuations.len(),
+            1,
+            "continuation moved along"
+        );
+        assert!(app.tape.dirty);
+        assert_eq!(app.tape.selected, Some(0));
+
+        // Delete SECOND; FIRST remains (one header+body block).
+        app.tape.delete_file(0);
+        assert_eq!(app.tape.files().len(), 1);
+        assert_eq!(file_name(&app, 0), "FIRST");
+        assert_eq!(app.tape.tape.blocks.len(), 1, "the file's block");
+
+        // Save under a new name and reopen.
+        let path2 = dir.join("copy.ptp");
+        app.tape.save_as(&path2).unwrap();
+        assert!(!app.tape.dirty);
+        assert_eq!(app.tape.path.as_deref(), Some(path2.as_path()));
+        app.open_tape(&path2).unwrap();
+        assert_eq!(app.tape.files().len(), 1);
+        assert_eq!(app.tape.export_file(0).unwrap(), c1);
+
+        // Import appends a new file and selects it.
+        let index = app
+            .tape
+            .import_file(5, b'?', "IMPORTD", 0x0300, b"hello tape")
+            .unwrap();
+        assert_eq!(index, 1);
+        assert_eq!(app.tape.selected, Some(1));
+        assert_eq!(app.tape.files().len(), 2);
+        assert_eq!(app.tape.export_file(1).unwrap(), b"hello tape");
+
+        // Saving without a path fails (fresh tape).
+        app.new_tape();
+        assert!(app.tape.save().is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tape_play_file_loads_via_the_machine() {
+        let mut app = test_app();
+        let mut content: Vec<u8> = (1..17u16).map(|i| i as u8).collect();
+        content.insert(0, 0x76); // halt, so the loaded file stops cleanly
+        app.tape
+            .tape
+            .blocks
+            .push(tape::make_file(0, b'?', "LOADTST", 0x1000, &content).unwrap());
+
+        // Boot the monitor, then type MGLD 00.
+        for _ in 0..500 {
+            app.machine.step_frame();
+        }
+        use Key::*;
+        type_command(&mut app, &[M, G, L, D, Space, Digit0, Digit0, Enter]);
+
+        // Play: the header and body are fed, then the session ends
+        // (auto-stop is on by default).
+        app.play_tape_file(0);
+        assert!(app.tape.is_playing());
+        assert!(app.machine.bus.tape.is_playing());
+        for _ in 0..1500 {
+            if !app.tape.is_playing() {
+                break;
+            }
+            app.machine.step_frame();
+            let _ = app.tape.pump(&mut app.machine);
+        }
+        assert!(!app.tape.is_playing(), "playback session did not end");
+        assert!(!app.machine.bus.tape.is_playing());
+        for (i, &expect) in content.iter().enumerate() {
+            assert_eq!(app.machine.bus.memory.ram[0x1000 + i], expect, "+{i}");
+        }
+    }
+
+    #[test]
+    fn machine_reset_clears_tape_playback() {
+        let mut app = test_app();
+        app.tape
+            .tape
+            .blocks
+            .push(tape::make_file(1, b'?', "ANYFILE", 0x1000, &[0x76, 0]).unwrap());
+        app.play_tape_file(0);
+        assert!(app.machine.bus.tape.is_playing());
+        app.machine.reset();
+        let _ = app.tape.pump(&mut app.machine);
+        assert!(!app.tape.is_playing(), "session survived the reset");
+        assert!(!app.machine.bus.tape.is_playing());
+    }
+
+    #[test]
+    fn tape_recording_is_harvested_into_the_editor() {
+        let mut app = test_app();
+        for _ in 0..500 {
+            app.machine.step_frame();
+        }
+        let content: Vec<u8> = (0..17u16).map(|i| 0xC0 ^ i as u8).collect();
+        for (i, &b) in content.iter().enumerate() {
+            app.machine.bus.memory.ram[0x2000 + i] = b;
+        }
+        use Key::*;
+        type_command(
+            &mut app,
+            &[
+                M, G, S, V, Space, Digit0, Digit0, Space, Digit2, Digit0, Digit0, Digit0, Space,
+                Digit2, Digit0, Digit1, Digit0, Enter,
+            ],
+        );
+        for _ in 0..1500 {
+            app.machine.step_frame();
+            let _ = app.tape.pump(&mut app.machine);
+            if !app.machine.bus.tape.is_recording() && !app.tape.tape.blocks.is_empty() {
+                break;
+            }
+        }
+        assert!(!app.machine.bus.tape.is_recording(), "recorder still active");
+        assert_eq!(app.tape.files().len(), 1, "recorded file not harvested");
+        assert!(app.tape.dirty);
+        assert_eq!(app.tape.export_file(0).unwrap(), content);
     }
 }

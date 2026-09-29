@@ -1,10 +1,20 @@
 //! Minimal Intel 8251 USART emulation.
 //!
-//! The PMD 85 uses the 8251 for the cassette recorder interface and V.24.
-//! This implementation models the programming interface (mode word,
-//! command word, status register) enough for the Monitor ROM to boot and
-//! to sit idle waiting for tape data, but it never produces received data
-//! (RxRDY stays low) and transmitted bytes are collected but ignored.
+//! The PMD 85 uses the 8251 for the cassette recorder interface and
+//! V.24. This implementation models the programming interface (mode
+//! word, command word, status register) enough for the Monitor ROM to
+//! boot and to run the tape routines:
+//!
+//! - the DSR input (status bit 7) is driven externally by the tape
+//!   deck (the Monitor 3 load routine bit-bangs the IRPS tape signal
+//!   through it),
+//! - transmitted bytes are collected (the deck's recorder sniffs
+//!   them), and
+//! - TxRDY/TxEMPTY can be held low by the deck to pace the ROM's save
+//!   routine at the authentic 1200-baud tape speed.
+//!
+//! Received data is never produced from the RxD pin (RxRDY stays
+//! low); Monitor 3 reads tape data by demodulating the DSR line.
 //!
 //! Status register:
 //! bit 0 TxRDY, bit 1 RxRDY, bit 2 TxEMPTY, bit 3 PE, bit 4 OE, bit 5 FE,
@@ -14,6 +24,8 @@
 pub struct I8251 {
     mode_word: Option<u8>,
     command: u8,
+    /// Internal status (errors, TxRDY/TxEMPTY); DSR and the transmit
+    /// gate are combined in `read`.
     status: u8,
     /// Sync-character load phase after a sync mode word.
     sync_chars_pending: u8,
@@ -24,6 +36,11 @@ pub struct I8251 {
     /// Mirrors of output control lines.
     pub dtr: bool,
     pub rts: bool,
+    /// External DSR line level (true = idle/mark).
+    dsr: bool,
+    /// Transmit-ready gate: `false` while the tape deck paces the
+    /// transmitter (see `set_tx_ready`).
+    tx_gate: bool,
 }
 
 impl Default for I8251 {
@@ -37,12 +54,14 @@ impl I8251 {
         I8251 {
             mode_word: None,
             command: 0,
-            status: Self::idle_status(),
+            status: Self::base_status(),
             sync_chars_pending: 0,
             rx_data: 0,
             tx_log: Vec::new(),
             dtr: false,
             rts: false,
+            dsr: true,
+            tx_gate: true,
         }
     }
 
@@ -50,18 +69,32 @@ impl I8251 {
         *self = I8251::new();
     }
 
-    fn idle_status() -> u8 {
-        // TxRDY | TxEMPTY | DSR
-        0x05 | 0x80
+    fn base_status() -> u8 {
+        // TxRDY | TxEMPTY (ready for the next byte; drains instantly
+        // unless the tape deck gates it).
+        0x05
+    }
+
+    /// Drive the external DSR line (status bit 7). The tape deck
+    /// toggles this to feed the IRPS signal to the monitor.
+    pub fn set_dsr(&mut self, level: bool) {
+        self.dsr = level;
+    }
+
+    /// Gate TxRDY/TxEMPTY low while the tape deck simulates the byte
+    /// shifting out at tape speed; released with `true`.
+    pub fn set_tx_ready(&mut self, ready: bool) {
+        self.tx_gate = ready;
     }
 
     /// Write to the control (1) or data (0) register.
     pub fn write(&mut self, reg: u32, data: u8) {
         match reg & 1 {
             0 => {
-                // transmit data; buffer drains instantly
+                // transmit data; the buffer drains instantly, the
+                // pacing (if any) is applied externally
                 self.tx_log.push(data);
-                self.status = Self::idle_status();
+                self.status = Self::base_status();
             }
             _ => self.write_control(data),
         }
@@ -103,7 +136,18 @@ impl I8251 {
                 // RxRDY stays low; reading empty data returns the last byte.
                 self.rx_data
             }
-            _ => self.status,
+            _ => {
+                let mut status = self.status;
+                if !self.tx_gate {
+                    status &= !(0x05); // TxRDY | TxEMPTY
+                }
+                if self.dsr {
+                    status |= 0x80;
+                } else {
+                    status &= !0x80;
+                }
+                status
+            }
         }
     }
 }
@@ -152,5 +196,39 @@ mod tests {
     fn rx_never_ready() {
         let mut uart = I8251::new();
         assert_eq!(uart.read(1) & 0x02, 0, "RxRDY must stay low without tape");
+    }
+
+    #[test]
+    fn dsr_line_reflects_in_status() {
+        let mut uart = I8251::new();
+        assert_eq!(uart.read(1) & 0x80, 0x80, "DSR idles high");
+        uart.set_dsr(false);
+        assert_eq!(uart.read(1) & 0x80, 0);
+        uart.set_dsr(true);
+        assert_eq!(uart.read(1) & 0x80, 0x80);
+        // A data write must not disturb the external line state.
+        uart.write(0, 0x42);
+        assert_eq!(uart.read(1) & 0x80, 0x80);
+    }
+
+    #[test]
+    fn tx_gate_holds_back_txrdy_and_txempty() {
+        let mut uart = I8251::new();
+        assert_eq!(uart.read(1) & 0x05, 0x05);
+        uart.set_tx_ready(false);
+        assert_eq!(uart.read(1) & 0x05, 0, "transmitter held busy");
+        // Other bits are unaffected.
+        assert_eq!(uart.read(1) & 0x80, 0x80);
+        uart.set_tx_ready(true);
+        assert_eq!(uart.read(1) & 0x05, 0x05);
+    }
+
+    #[test]
+    fn reset_restores_external_lines() {
+        let mut uart = I8251::new();
+        uart.set_dsr(false);
+        uart.set_tx_ready(false);
+        uart.reset();
+        assert_eq!(uart.read(1), 0x85);
     }
 }
