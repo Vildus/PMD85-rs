@@ -5,6 +5,7 @@
 //! CPU; [`Machine`] pairs the two and exposes a frame-based stepping API
 //! for the presentation layer.
 
+use crate::audio::{SpeakerEdge, SpeakerEdgeLog};
 use crate::bus::Memory;
 use crate::chips::ppi8255::{I8255, Port};
 use crate::chips::pit8253::I8253;
@@ -35,10 +36,17 @@ pub struct MachineBus {
     ppi_rom: I8255,
     pub pit: I8253,
     pub uart: I8251,
-    /// Speaker level (PC2 of the system 8255).
+    /// Speaker level (combined PC2/PC0/PC1 sound circuit, see
+    /// [`speaker_level_from`]).
     speaker_level: bool,
-    /// LED driven from PC3 of the system 8255.
+    /// LED driven from PC3 of the system 8255 (red).
     pub led: bool,
+    /// Cycle-stamped speaker transitions, drained by the audio frontend.
+    speaker_edges: SpeakerEdgeLog,
+    /// The speaker level changed during the current instruction; the
+    /// edge gets stamped (with the end-of-instruction cycle count) by
+    /// `advance_time`.
+    pending_speaker_edge: bool,
     /// Emulated-time bookkeeping.
     total_cycles: u64,
 }
@@ -59,6 +67,8 @@ impl MachineBus {
             uart: I8251::new(),
             speaker_level: false,
             led: false,
+            speaker_edges: SpeakerEdgeLog::default(),
+            pending_speaker_edge: false,
             total_cycles: 0,
         };
         bus.reset();
@@ -78,10 +88,52 @@ impl MachineBus {
         self.uart.reset();
         self.speaker_level = false;
         self.led = false;
+        self.speaker_edges.clear();
+        self.pending_speaker_edge = false;
+    }
+
+    /// The piezo transducer on the PMD 85 keyboard is driven by a small
+    /// sound circuit fed from the system 8255 port C (see pmd85.borik.net,
+    /// "Klávesnica PMD 85"):
+    ///
+    /// - PC2 drives the transducer directly: software can generate a
+    ///   square wave of arbitrary pitch by toggling it. A constant PC2=1
+    ///   is DC, i.e. silence.
+    /// - PC0 and PC1 gate fixed ~1 kHz / ~4 kHz tones derived from the
+    ///   video divider; this is how the monitors make their key clicks
+    ///   (`IN F6; ORA 2; OUT F6` bursts).
+    ///
+    /// The effective level is the OR of all three contributions.
+    fn speaker_level_from(pc: u8, cycles: u64) -> bool {
+        if pc & 0x04 != 0 {
+            return true;
+        }
+        // 1 kHz: period 2048 cycles; 4 kHz: period 512 cycles. Phase is
+        // tied to the video divider; any phase is authentic.
+        let clk_1k = (cycles >> 10) & 1 == 1;
+        let clk_4k = (cycles >> 8) & 1 == 1;
+        (pc & 0x01 != 0 && clk_1k) || (pc & 0x02 != 0 && clk_4k)
+    }
+
+    /// Recompute the speaker level from the port C latch at the current
+    /// cycle count; mark a pending edge if it changed.
+    fn refresh_speaker(&mut self) {
+        let level = Self::speaker_level_from(self.ppi_system.outputs[2], self.total_cycles);
+        if level != self.speaker_level {
+            self.speaker_level = level;
+            self.pending_speaker_edge = true;
+        }
     }
 
     pub fn speaker_level(&self) -> bool {
         self.speaker_level
+    }
+
+    /// Drain recorded speaker edges (cycle-stamped PC2 transitions),
+    /// oldest first. Intended to be called once per frame by the audio
+    /// frontend.
+    pub fn take_speaker_edges(&mut self) -> Vec<SpeakerEdge> {
+        self.speaker_edges.drain()
     }
 
     /// Current keyboard scan column (system 8255 port A output).
@@ -97,6 +149,18 @@ impl MachineBus {
     /// Advance peripheral clocks by `cycles` CPU cycles.
     fn advance_time(&mut self, cycles: u64) {
         self.total_cycles += cycles;
+        // The speaker level can change both through port C writes (which
+        // call refresh_speaker inside the instruction) and through the
+        // fixed-tone clock phases flipping; either way the transition is
+        // stamped at the end of the current instruction.
+        self.refresh_speaker();
+        if self.pending_speaker_edge {
+            self.pending_speaker_edge = false;
+            self.speaker_edges.push(SpeakerEdge {
+                cycle: self.total_cycles,
+                level: self.speaker_level,
+            });
+        }
         // 8253 counter 1 is clocked by the ~2 MHz system clock, counter 2
         // by a 1 Hz generator.
         let seconds_before = (self.total_cycles - cycles) / CPU_CLOCK_HZ;
@@ -175,8 +239,8 @@ impl MachineBus {
                     // PC2 = speaker, PC3 = LED; both follow the output
                     // latch (full writes and BSR operations alike).
                     self.ppi_system.write(Port::from_index(reg), data);
-                    self.speaker_level = self.ppi_system.outputs[2] & 0x04 != 0;
                     self.led = self.ppi_system.outputs[2] & 0x08 != 0;
+                    self.refresh_speaker();
                 }
             }
             0x08 => {
@@ -248,6 +312,13 @@ impl Machine {
     /// (debugging aid).
     pub fn keyboard_scan_column(&self) -> u8 {
         self.bus.ppi_system_scan()
+    }
+
+    /// Drain recorded speaker edges (cycle-stamped PC2 transitions),
+    /// oldest first. Intended to be called once per frame by the audio
+    /// frontend.
+    pub fn take_speaker_edges(&mut self) -> Vec<SpeakerEdge> {
+        self.bus.take_speaker_edges()
     }
 
     /// Run one video frame worth of emulation (~20 ms).
@@ -336,6 +407,64 @@ mod tests {
         // BSR reset PC2: bit select 2, reset -> 0b0000_0100
         m.bus.io_write(0x87, 0b0000_0100);
         assert!(!m.bus.speaker_level());
+    }
+
+    #[test]
+    fn speaker_edges_are_cycle_stamped() {
+        // MVI A,0x05; OUT 0x87 (BSR: set PC2); then MVI A,0x04; OUT 0x87
+        // (reset PC2). The first two instructions execute from the ROM
+        // via the startup shadow map; the OUT write drops the shadow map,
+        // so the rest is fetched from RAM, where it is pre-placed (the
+        // 0x00 filler is NOP). MVI takes 7 cycles, OUT 10.
+        let mut monitor = vec![0x00; 0x2000];
+        monitor[0] = 0x3E;
+        monitor[1] = 0x05;
+        monitor[2] = 0xD3;
+        monitor[3] = 0x87;
+        let mut m = Machine::new(Model::Pmd853, &monitor, None);
+        m.bus.memory.ram[4] = 0x3E;
+        m.bus.memory.ram[5] = 0x04;
+        m.bus.memory.ram[6] = 0xD3;
+        m.bus.memory.ram[7] = 0x87;
+        m.run_cycles(40);
+        assert_eq!(
+            m.take_speaker_edges(),
+            vec![
+                SpeakerEdge {
+                    cycle: 17,
+                    level: true
+                },
+                SpeakerEdge {
+                    cycle: 34,
+                    level: false
+                },
+            ]
+        );
+        // drained: nothing left
+        assert!(m.take_speaker_edges().is_empty());
+    }
+
+    #[test]
+    fn speaker_pc0_gates_1khz_tone() {
+        let mut m = Machine::new(Model::Pmd852, &rom(0x1000), None);
+        m.bus.io_write(0x87, 0x00); // any write clears the startup map
+        // BSR: set PC0 -> gates the 1 kHz divider tone onto the speaker
+        m.bus.io_write(0x87, 0b0000_0001);
+        m.step_frame();
+        let edges = m.take_speaker_edges();
+        // 1 kHz square wave over a 20 ms frame: ~40 level transitions
+        assert!(
+            (38..=42).contains(&edges.len()),
+            "unexpected 1 kHz edge count {}",
+            edges.len()
+        );
+        for pair in edges.windows(2) {
+            assert_eq!(pair[0].level, !pair[1].level);
+        }
+        // clearing the gate silences it again
+        m.bus.io_write(0x87, 0b0000_0000);
+        m.step_frame();
+        assert!(m.take_speaker_edges().is_empty());
     }
 
     #[test]

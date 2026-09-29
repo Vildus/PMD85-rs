@@ -12,6 +12,8 @@ fn main() {
     let mut model = Model::Pmd853;
     let mut frames = 400u64;
     let mut typed = String::new();
+    let mut rom_module: Option<String> = None;
+    let mut trace_module_ports = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -21,15 +23,47 @@ fn main() {
             }
             "--frames" => frames = args.next().expect("--frames needs a value").parse().unwrap(),
             "--press" => typed = args.next().expect("--press needs a value"),
+            "--rom-module" => rom_module = Some(args.next().expect("--rom-module needs a value")),
+            "--trace-module-ports" => trace_module_ports = true,
             other => panic!("unknown argument {other}"),
         }
     }
 
     let monitor = std::fs::read(format!("{ROM_DIR}{}", model.default_monitor()))
         .expect("cannot read monitor ROM");
-    let mut machine = Machine::new(model, &monitor, None);
+    let rom_module = rom_module.map(|p| {
+        let path = if p.contains('/') {
+            p
+        } else {
+            format!("{ROM_DIR}{p}")
+        };
+        std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read ROM module {path:?}: {e}"))
+    });
+    let mut machine = Machine::new(model, &monitor, rom_module);
     for _ in 0..frames {
-        machine.step_frame();
+        if trace_module_ports {
+            // log all I/O touching the ROM module connector (0x88-0x8B)
+            let frame_end = machine.bus.total_cycles() / 40960 + 1;
+            while machine.bus.total_cycles() / 40960 < frame_end {
+                let pc = machine.cpu.pc;
+                let opcode = machine.bus.memory.read(pc);
+                if opcode == 0xDB || opcode == 0xD3 {
+                    let port = machine.bus.memory.read(pc.wrapping_add(1));
+                    machine.step_once();
+                    if port & 0x0C == 0x08 {
+                        println!(
+                            "  boot pc={pc:#06x} {} port={port:#04x} a={:#04x}",
+                            if opcode == 0xDB { "IN " } else { "OUT" },
+                            machine.cpu.a
+                        );
+                    }
+                } else {
+                    machine.step_once();
+                }
+            }
+        } else {
+            machine.step_frame();
+        }
     }
 
     // dump the monitor's system area in hidden VRAM bytes
@@ -40,10 +74,14 @@ fn main() {
     );
     let p = (machine.bus.memory.ram[0xC072] as usize)
         | ((machine.bus.memory.ram[0xC073] as usize) << 8);
-    println!(
-        "line ptr @0xC072 = {p:#06x}, bytes there: {:02x?}",
-        &machine.bus.memory.ram[p..p + 24]
-    );
+    if p + 24 <= 0x10000 {
+        println!(
+            "line ptr @0xC072 = {p:#06x}, bytes there: {:02x?}",
+            &machine.bus.memory.ram[p..p + 24]
+        );
+    } else {
+        println!("line ptr @0xC072 = {p:#06x} (out of range)");
+    }
     println!(
         "ram[0xC1B0..0xC1C0] = {:02x?}",
         &machine.bus.memory.ram[0xC1B0..0xC1C0]
@@ -58,58 +96,40 @@ fn main() {
             }
         };
         println!("=== press {ch:?} -> key {key:?}");
-        if key == Key::Enter {
-            let p = (machine.bus.memory.ram[0xC072] as usize)
-                | ((machine.bus.memory.ram[0xC073] as usize) << 8);
-            println!(
-                "  LINE ptr @0xC072 = {p:#06x}, bytes: {:02x?}",
-                &machine.bus.memory.ram[p & 0xFFFF..(p & 0xFFFF) + 24]
-            );
-        }
         machine.bus.keyboard.set_key(key, true);
-        trace_frames(&mut machine, 6);
+        trace_frames(&mut machine, 8);
         println!("=== release {ch:?}");
         machine.bus.keyboard.set_key(key, false);
         if key == Key::Enter {
-            let mut frame_no = 0;
-            let mut hist: std::collections::BTreeMap<u16, usize> = std::collections::BTreeMap::new();
-            let mut seen: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
-            for _ in 0..200u64 {
+            // Collapsed PC-path trace for a while after Enter: shows where the
+            // typed line gets dispatched. Run-length encoded, capped output.
+            let mut path: Vec<(u16, u64)> = Vec::new();
+            for _ in 0..120u64 {
                 let frame_end = machine.bus.total_cycles() / 40960 + 1;
                 while machine.bus.total_cycles() / 40960 < frame_end {
                     let pc = machine.cpu.pc;
-                    *hist.entry(pc).or_insert(0) += 1;
-                    let tag = if (0xE8A3..=0xE8B7).contains(&pc) {
-                        "melody"
-                    } else if (0xEBCB..=0xEBD7).contains(&pc) {
-                        "delay"
-                    } else if (0xE877..=0xE8A2).contains(&pc) {
-                        "lookup"
-                    } else if (0xEBB0..=0xEBD0).contains(&pc) {
-                        "dispatch"
-                    } else if (0xE049..=0xE113).contains(&pc) {
-                        "e049-e113"
-                    } else {
-                        ""
-                    };
-                    if !tag.is_empty() {
-                        seen.entry(tag.to_string()).or_insert(frame_no);
+                    match path.last_mut() {
+                        Some((p, n)) if *p == pc => *n += 1,
+                        _ => path.push((pc, 1)),
                     }
                     machine.step_once();
                 }
-                frame_no += 1;
             }
-            for (tag, f) in &seen {
-                println!("  TIMELINE {tag} first seen at frame {f}");
+            for (i, (pc, n)) in path.iter().enumerate() {
+                if i >= 200 {
+                    println!("  PATH ... {} entries total", path.len());
+                    break;
+                }
+                println!("  PATH pc={pc:#06x} x{n}");
             }
-            let mut top: Vec<(u16, usize)> = hist.into_iter().collect();
-            top.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-            for (pc, n) in top.iter().take(20) {
-                println!("  HIST pc={pc:#06x} x{n}");
-            }
-            println!("  final pc={:#06x} sp={:#06x}", machine.cpu.pc, machine.cpu.sp);
-            vram_diff(&mut machine);
-            return;
+            println!(
+                "  after-Enter pc={:#06x} sp={:#06x}",
+                machine.cpu.pc, machine.cpu.sp
+            );
+            println!(
+                "  C078 buffer: {:02x?}",
+                &machine.bus.memory.ram[0xC078..0xC0A0]
+            );
         }
         trace_frames(&mut machine, 6);
         vram_diff(&mut machine);
@@ -172,26 +192,6 @@ fn trace_frames(machine: &mut Machine, frames: u64) {
     top.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     for (pc, n) in top.iter().take(60) {
         println!("  HIST pc={pc:#06x} x{n}");
-    }
-}
-
-/// Trace PCs through an address range (watchpoint-style), dumping registers.
-#[allow(dead_code)]
-fn watch(machine: &mut Machine, frames: u64, range: (u16, u16)) {
-    for _ in 0..frames {
-        let frame_end = machine.bus.total_cycles() / 40960 + 1;
-        while machine.bus.total_cycles() / 40960 < frame_end {
-            let pc = machine.cpu.pc;
-            if pc == range.0 {
-                println!(
-                    "  WATCH pc={pc:#06x} a={:#04x} sp={:#06x} hl={:#06x} de={:#06x} b={:#04x} c={:#04x}",
-                    machine.cpu.a, machine.cpu.sp, machine.cpu.hl(), machine.cpu.de(), machine.cpu.b, machine.cpu.c
-                );
-            } else if pc > range.0 && pc <= range.1 {
-                // silent
-            }
-            machine.step_once();
-        }
     }
 }
 

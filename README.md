@@ -27,6 +27,16 @@ Options:
 - `--model <name>` — `85-1`, `85-2`, `85-2A` or `85-3` (default `85-3`)
 - `--monitor <path>` — monitor ROM image (default `Rom/<model's monitor>.rom`)
 - `--rom-module <path>` — optional 8 KiB ROM module (`.rmm`) at 0x8000
+- `--mute` — disable speaker output
+
+Speaker audio plays through the default output device. The PMD 85 sound
+circuit is emulated as a whole: PC2 of the system 8255 drives the piezo
+transducer directly (software-generated square wave, e.g. BASIC beeps),
+while PC0 and PC1 gate fixed 1 kHz / 4 kHz tones derived from the video
+divider — which is how the monitor ROMs make their key clicks. The app
+converts the cycle-stamped speaker edges into a mono stream (any output
+sample rate, exact integer timing) and feeds cpal through a small ring
+buffer; without an audio device it runs silent.
 
 The Monitor-3 command line works: type e.g. `DUMP 0100` (addresses are
 4-digit hex) and press Enter. `JUMP FFF0` switches the PMD 85-3 into the
@@ -51,12 +61,17 @@ cargo test --workspace
 ```
 
 - `pmd85-core` unit tests: every instruction group, memory maps, chips,
-  keyboard, VRAM decode
+  keyboard, VRAM decode, speaker edge log and edge-to-sample expansion
 - CP/M diagnostic ROMs run headless through the machine (`diag_tests`);
   `8080EXM` is `#[ignore]`d (run it in release: ~20 s)
 - `boot_tests`: every model boots its monitor ROM to a working command
-  line, keyboard echo lands in VRAM, and Monitor-3 executes a real
-  `DUMP` command end-to-end
+  line, keyboard echo lands in VRAM, Monitor-3 executes a real `DUMP`
+  command end-to-end, and keypresses produce the speaker click
+- `module_tests`: the monitor BIOS itself detects an attached ROM module
+  through the module 8255, copies it to RAM 0 and runs it (basic1/2/2A/3,
+  one test per model, plus a no-module control)
+- `pmd85-app`: ring-buffer and live audio-stream tests (skipped silently
+  when no output device is present)
 
 ## Debug tools
 
@@ -65,16 +80,19 @@ cargo test --workspace
 - `boot_dump` — boots a model, optionally presses keys, writes the decoded
   screen to a PNG and a coarse ASCII rendering (e.g.
   `cargo run -p pmd85-core --example boot_dump -- --model 85-3 --frames 400
-  --press "DUMP 0100[ENTER]" --out screen.png`)
+  --press "DUMP 0100[ENTER]" --out screen.png`); the press string also
+  supports `[SHIFT]`/`[UNSHIFT]` and `[WAIT:n]` to idle n frames (useful
+  after a command that boots a ROM module)
 - `kbd_trace` — IN/OUT, VRAM and RAM-state tracing while typing
 
 ## Status
 
 Done: CPU, memory, keyboard, video, boot of all four models, monitor
-command execution, wgpu display.
+command execution, ROM module support (monitor BIOS detects/transfers/runs
+BASIC modules), wgpu display, speaker audio.
 
-Not yet: cassette/serial I/O beyond stubs, audio output, debugger UI,
-settings, tape/disk image support.
+Not yet: cassette/serial I/O beyond stubs, debugger UI, settings, tape/disk
+image support.
 
 ## References
 

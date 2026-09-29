@@ -19,6 +19,7 @@ fn main() {
     let mut typed = String::new();
     let mut out = String::from("boot_dump.png");
     let mut settle = 100u64;
+    let mut rom_module: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -30,13 +31,23 @@ fn main() {
             "--press" => typed = args.next().expect("--press needs a value"),
             "--settle" => settle = args.next().expect("--settle needs a value").parse().unwrap(),
             "--out" => out = args.next().expect("--out needs a value"),
+            "--rom-module" => rom_module = Some(args.next().expect("--rom-module needs a value")),
             other => panic!("unknown argument {other}"),
         }
     }
 
     let monitor = std::fs::read(format!("{ROM_DIR}{}", model.default_monitor()))
         .expect("cannot read monitor ROM");
-    let mut machine = Machine::new(model, &monitor, None);
+    let rom_module = rom_module.map(|p| {
+        let data = if p.contains('/') {
+            std::fs::read(&p).unwrap_or_else(|e| panic!("cannot read ROM module {p:?}: {e}"))
+        } else {
+            std::fs::read(format!("{ROM_DIR}{p}"))
+                .unwrap_or_else(|e| panic!("cannot read ROM module {p:?}: {e}"))
+        };
+        data
+    });
+    let mut machine = Machine::new(model, &monitor, rom_module);
 
     for _ in 0..frames {
         machine.step_frame();
@@ -75,7 +86,27 @@ fn main() {
             tokens.push(c.to_string());
         }
     }
+    // `[SHIFT]` is sticky: it stays held for following keys until `[UNSHIFT]`.
+    let mut shift_held = false;
     for tok in tokens {
+        if tok == "SHIFT" {
+            shift_held = true;
+            continue;
+        }
+        if tok == "UNSHIFT" {
+            shift_held = false;
+            continue;
+        }
+        if let Some(n) = tok.strip_prefix("WAIT:") {
+            // [WAIT:n] - run n frames without touching the keyboard.
+            // Used after commands that start a program (e.g. `BASIC G`)
+            // so it has time to boot before further keys are typed.
+            let n: u32 = n.parse().expect("[WAIT:n] needs a number");
+            for _ in 0..n {
+                machine.step_frame();
+            }
+            continue;
+        }
         let key = match token_to_key(&tok) {
             Some(k) => k,
             None => {
@@ -83,11 +114,15 @@ fn main() {
                 continue;
             }
         };
+        if shift_held {
+            machine.bus.keyboard.set_key(Key::Shift, true);
+        }
         machine.bus.keyboard.set_key(key, true);
         for _ in 0..8 {
             machine.step_frame();
         }
         machine.bus.keyboard.set_key(key, false);
+        machine.bus.keyboard.set_key(Key::Shift, false);
         for _ in 0..8 {
             machine.step_frame();
         }

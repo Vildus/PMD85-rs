@@ -67,6 +67,63 @@ fn check_booted_and_echo(model: Model, frames: u64) {
 }
 
 #[test]
+fn keypress_produces_speaker_click() {
+    // The monitor acknowledges every keypress with a short click: a
+    // burst of the PC1-gated 4 kHz fixed tone from the video divider,
+    // i.e. a short run of speaker edges ~256 cycles apart. Monitor 1
+    // (85-1) is the exception: it only beeps for errors and commands,
+    // not for plain keypresses.
+    for model in [Model::Pmd852, Model::Pmd852a, Model::Pmd853] {
+        let frames = if model == Model::Pmd853 { 500 } else { 200 };
+        let mut machine = boot(model, frames);
+        machine.take_speaker_edges(); // discard boot-time noise, if any
+
+        machine.bus.keyboard.set_key(Key::A, true);
+        for _ in 0..8 {
+            machine.step_frame();
+        }
+        machine.bus.keyboard.set_key(Key::A, false);
+        for _ in 0..8 {
+            machine.step_frame();
+        }
+
+        let edges = machine.take_speaker_edges();
+        assert!(
+            !edges.is_empty(),
+            "{model:?}: no speaker activity on keypress"
+        );
+        // A 4 kHz burst over a ~16 frame keypress: tens of edges at
+        // most, each toggling the level, spaced by one 512-cycle tone
+        // period (within instruction-timing jitter).
+        assert!(edges.len() < 200, "{model:?}: suspicious edge count {}", edges.len());
+        for pair in edges.windows(2) {
+            assert_eq!(
+                pair[0].level, !pair[1].level,
+                "{model:?}: click edges do not alternate"
+            );
+            let spacing = pair[1].cycle - pair[0].cycle;
+            assert!(
+                (150..350).contains(&spacing),
+                "{model:?}: click edge spacing {spacing} is not ~256 cycles"
+            );
+        }
+    }
+
+    // 85-1: plain keypresses are silent.
+    let mut machine = boot(Model::Pmd851, 200);
+    machine.take_speaker_edges();
+    machine.bus.keyboard.set_key(Key::A, true);
+    for _ in 0..8 {
+        machine.step_frame();
+    }
+    machine.bus.keyboard.set_key(Key::A, false);
+    for _ in 0..8 {
+        machine.step_frame();
+    }
+    assert!(machine.take_speaker_edges().is_empty());
+}
+
+#[test]
 fn pmd851_boots_and_echoes() {
     check_booted_and_echo(Model::Pmd851, 200);
 }

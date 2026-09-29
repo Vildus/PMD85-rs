@@ -4,6 +4,7 @@
 //! keyboard matrix) and carries no windowing or GPU dependencies, so it can
 //! be exercised headlessly in tests.
 
+pub mod audio;
 pub mod bus;
 pub mod chips;
 pub mod cpu;

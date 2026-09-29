@@ -1,6 +1,7 @@
 //! Desktop application: a winit window with a wgpu renderer that blits the
 //! emulated PMD 85 framebuffer to the screen, driving the machine at 50 Hz.
 
+mod audio;
 mod keys;
 
 use std::sync::Arc;
@@ -24,6 +25,7 @@ struct Args {
     model: Model,
     monitor: String,
     rom_module: Option<String>,
+    mute: bool,
 }
 
 fn parse_args() -> Args {
@@ -31,6 +33,7 @@ fn parse_args() -> Args {
         model: Model::Pmd853,
         monitor: String::new(),
         rom_module: None,
+        mute: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -42,6 +45,7 @@ fn parse_args() -> Args {
             }
             "--monitor" => args.monitor = it.next().expect("--monitor needs a value"),
             "--rom-module" => args.rom_module = Some(it.next().expect("--rom-module needs a value")),
+            "--mute" => args.mute = true,
             other => panic!("unknown argument {other:?}"),
         }
     }
@@ -372,6 +376,8 @@ struct App {
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
     decode_buf: Vec<u8>,
+    /// Speaker output (None when muted or no device available).
+    audio: Option<audio::SpeakerOut>,
     /// Wall-clock anchor for the next emulated frame (50 Hz).
     next_frame: Instant,
     /// Emulated frames owed to the machine (catch-up after a stall).
@@ -399,12 +405,18 @@ impl App {
         let rom_module = args
             .rom_module
             .map(|p| std::fs::read(&p).unwrap_or_else(|e| panic!("cannot read ROM module {p:?}: {e}")));
+        let audio = if args.mute {
+            None
+        } else {
+            audio::SpeakerOut::new()
+        };
         Self {
             machine: Machine::new(args.model, &monitor, rom_module),
             profile: ColorProfile::Rgb,
             window: None,
             gpu: None,
             decode_buf: Vec::new(),
+            audio,
             next_frame: Instant::now(),
             pending: 0,
             frames_done: 0,
@@ -419,6 +431,13 @@ impl App {
         self.pending = 0;
         for _ in 0..frames {
             self.machine.step_frame();
+        }
+        // Feed the speaker: expand this frame's edges into samples and
+        // hand them to the audio thread (dropped silently when muted or
+        // no device - the edge log in the core is bounded either way).
+        let edges = self.machine.take_speaker_edges();
+        if let Some(audio) = &mut self.audio {
+            audio.submit(edges, self.machine.bus.total_cycles());
         }
         // Pace diagnostics (visible with RUST_LOG=debug).
         self.frames_done += frames;
