@@ -25,6 +25,11 @@ pub struct UiState {
     pub theme_customize: bool,
     /// Unsaved working copy in the color editor (theme name + palette).
     pub theme_draft: Option<theme::Theme>,
+    /// Emulated key currently held down via a click in the keyboard
+    /// view (released when the pointer button goes up).
+    pub mouse_key: Option<pmd85_core::keyboard::Key>,
+    /// Whether the keyboard view's RST cap is pointer-held.
+    pub mouse_rst: bool,
 }
 
 /// Draw the whole UI for one frame (between `begin_pass`/`end_pass`).
