@@ -148,10 +148,7 @@ impl Counter {
             } else {
                 lo -= 1;
             }
-            self.count = ((hi3 as u16) << 12)
-                | ((hi2 as u16) << 8)
-                | ((hi as u16) << 4)
-                | lo as u16;
+            self.count = (hi3 << 12) | (hi2 << 8) | (hi << 4) | lo;
         } else {
             self.count = self.count.wrapping_sub(1);
         }
@@ -293,6 +290,12 @@ impl Counter {
 #[derive(Clone, Debug)]
 pub struct I8253 {
     pub counters: [Counter; 3],
+}
+
+impl Default for I8253 {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl I8253 {

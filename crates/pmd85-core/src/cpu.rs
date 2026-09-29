@@ -199,7 +199,7 @@ impl Cpu {
     }
 
     fn parity(v: u8) -> bool {
-        v.count_ones() % 2 == 0
+        v.count_ones().is_multiple_of(2)
     }
 
     fn set_zsp(&mut self, v: u8) {

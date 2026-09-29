@@ -30,6 +30,16 @@ impl Model {
         }
     }
 
+    /// Canonical short name ("85-1" ... "85-3").
+    pub fn name(self) -> &'static str {
+        match self {
+            Model::Pmd851 => "85-1",
+            Model::Pmd852 => "85-2",
+            Model::Pmd852a => "85-2A",
+            Model::Pmd853 => "85-3",
+        }
+    }
+
     /// Parse from a CLI-style string.
     pub fn from_str_loose(s: &str) -> Option<Model> {
         match s.to_ascii_lowercase().as_str() {

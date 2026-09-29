@@ -14,7 +14,15 @@ pmd85-core = { workspace = true }
 wgpu = "30"
 winit = "0.30"
 pollster = "0.3"
-bytemuck = { version = "1", features = ["derive"] }
 log = "0.4"
 env_logger = "0.11"
 cpal = "0.18"
+egui = "0.36"
+egui-wgpu = { version = "0.36", features = ["winit", "x11", "wayland"] }
+egui-winit = "0.36"
+egui-phosphor = { version = "0.14", features = ["regular", "fill"] }
+rfd = "0.15"
+raw-window-handle = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "6"

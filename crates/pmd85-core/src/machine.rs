@@ -204,16 +204,14 @@ impl MachineBus {
                     return self.ppi_rom.read(Port::from_index(reg), pa, 0xFF, 0xFF);
                 }
             }
-            0x0C => {
-                if port & 0x80 == 0 {
-                    // I/O board interfaces
-                    match port & 0x70 {
-                        0x10 => return self.uart.read(port as u32 & 1),
-                        0x40 => return self.ppi_gpio.read(Port::from_index(reg), 0xFF, 0xFF, 0xFF),
-                        0x50 => return self.pit.read(port as u32 & 3),
-                        0x70 => return self.ppi_ims2.read(Port::from_index(reg), 0xFF, 0xFF, 0xFF),
-                        _ => {}
-                    }
+            0x0C if port & 0x80 == 0 => {
+                // I/O board interfaces
+                match port & 0x70 {
+                    0x10 => return self.uart.read(port as u32 & 1),
+                    0x40 => return self.ppi_gpio.read(Port::from_index(reg), 0xFF, 0xFF, 0xFF),
+                    0x50 => return self.pit.read(port as u32 & 3),
+                    0x70 => return self.ppi_ims2.read(Port::from_index(reg), 0xFF, 0xFF, 0xFF),
+                    _ => {}
                 }
             }
             _ => {}
@@ -249,16 +247,14 @@ impl MachineBus {
                     self.ppi_rom.write(Port::from_index(reg), data);
                 }
             }
-            0x0C => {
-                if port & 0x80 == 0 {
-                    // I/O board interfaces
-                    match port & 0x70 {
-                        0x10 => self.uart.write(port as u32 & 1, data),
-                        0x40 => self.ppi_gpio.write(Port::from_index(reg), data),
-                        0x50 => self.pit.write(port as u32 & 3, data),
-                        0x70 => self.ppi_ims2.write(Port::from_index(reg), data),
-                        _ => {}
-                    }
+            0x0C if port & 0x80 == 0 => {
+                // I/O board interfaces
+                match port & 0x70 {
+                    0x10 => self.uart.write(port as u32 & 1, data),
+                    0x40 => self.ppi_gpio.write(Port::from_index(reg), data),
+                    0x50 => self.pit.write(port as u32 & 3, data),
+                    0x70 => self.ppi_ims2.write(Port::from_index(reg), data),
+                    _ => {}
                 }
             }
             _ => {}
@@ -351,6 +347,18 @@ mod tests {
 
     fn rom(size: usize) -> Vec<u8> {
         vec![0x00; size]
+    }
+
+    #[test]
+    fn names_round_trip() {
+        for model in [
+            Model::Pmd851,
+            Model::Pmd852,
+            Model::Pmd852a,
+            Model::Pmd853,
+        ] {
+            assert_eq!(Model::from_str_loose(model.name()), Some(model));
+        }
     }
 
     #[test]

@@ -26,6 +26,12 @@ pub struct I8251 {
     pub rts: bool,
 }
 
+impl Default for I8251 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl I8251 {
     pub fn new() -> Self {
         I8251 {

@@ -61,11 +61,21 @@ impl SharedRing {
         self.read += 1;
         Some(v)
     }
+
+    /// Drop all buffered samples (used when the sample timeline is
+    /// reset, so stale audio from the old timeline is not played out).
+    fn clear(&mut self) {
+        self.read = 0;
+        self.write = 0;
+    }
 }
 
 /// Speaker output for the app: expander plus a live cpal stream.
 pub struct SpeakerOut {
     expander: EdgeExpander,
+    /// The stream's sample rate (kept to rebuild the expander on
+    /// [`SpeakerOut::resync`]).
+    sample_rate: u32,
     ring: Arc<Mutex<SharedRing>>,
     /// Kept alive for the lifetime of the app: dropping the stream
     /// would stop the audio (hence the underscore).
@@ -133,10 +143,25 @@ impl SpeakerOut {
         );
         Some(SpeakerOut {
             expander: EdgeExpander::new(sample_rate, 0, false),
+            sample_rate,
             ring,
             _stream: stream,
             scratch: Vec::new(),
         })
+    }
+
+    /// Restart the sample timeline at cycle 0 and drop buffered samples.
+    ///
+    /// Must be called whenever the emulated machine is replaced by a
+    /// fresh one (model/module switch): the new machine's cycle counter
+    /// starts over while this object keeps rendering up to the old
+    /// machine's last cycle, which would otherwise silence the speaker
+    /// forever.
+    pub fn resync(&mut self) {
+        self.expander = EdgeExpander::new(self.sample_rate, 0, false);
+        if let Ok(mut ring) = self.ring.lock() {
+            ring.clear();
+        }
     }
 
     /// Feed a frame's worth of edges (from `Machine::take_speaker_edges`)
@@ -161,6 +186,7 @@ impl SpeakerOut {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pmd85_core::machine::CYCLES_PER_FRAME;
 
     #[test]
     fn ring_fifo_and_underrun() {
@@ -193,6 +219,36 @@ mod tests {
             assert_eq!(r.pop(), Some((round + 1) as f32));
             assert_eq!(r.pop(), Some((round + 2) as f32));
         }
+    }
+
+    #[test]
+    fn expander_silenced_by_cycle_origin_restart() {
+        // Documents the failure mode `SpeakerOut::resync` fixes: the
+        // app replaces the whole machine on a model/module switch, and
+        // the new machine's cycle counter starts at 0 again. An
+        // expander kept across the rebuild renders nothing, forever.
+        let mut exp = EdgeExpander::new(48000, 0, false);
+        let mut out = Vec::new();
+        exp.render_until(CYCLES_PER_FRAME * 100, &mut out);
+        assert_eq!(out.len(), 96_000);
+        exp.render_until(CYCLES_PER_FRAME, &mut out);
+        assert_eq!(out.len(), 96_000, "samples rendered for a restarted machine");
+    }
+
+    #[test]
+    fn resync_restarts_sample_timeline_after_machine_rebuild() {
+        let Some(mut out) = SpeakerOut::new() else {
+            return; // no audio device: nothing to verify
+        };
+        // A long session on the first machine fills the output buffer.
+        out.submit(Vec::new(), CYCLES_PER_FRAME * 100);
+        assert!(out.ring.lock().unwrap().len() > 0);
+        // The machine is rebuilt; without the resync the expander would
+        // never emit another sample.
+        out.resync();
+        out.submit(Vec::new(), CYCLES_PER_FRAME);
+        let after = out.ring.lock().unwrap().len();
+        assert!(after > 0, "speaker silent after machine rebuild");
     }
 
     #[test]
