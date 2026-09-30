@@ -1,0 +1,76 @@
+-------------------------------------------------------------------------------
+# Rozne hry #
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+* games-1.ptp *
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+| Meno     | Spustenie | Model    | Autor                                     |
+-------------------------------------------------------------------------------
+| AUTO     | JUMP 2000 | 1,2,2A,3 | R.D.                                      |
+| INVADERS | JUMP 0100 | 1,2,2A,3 | IFO software, UAK Bratislava              |
+| KURA     | JUMP 0000 | 1,2,2A,3 | SAS                                       |
+| MUR      | JUMP 0000 | 1,2,2A,3 | SAS                                       |
+| PUZZLE   | JUMP 0000 | 1,2,2A,3 | SAS                                       |
+| TANK     | JUMP 2000 | 1,2,2A   | Pavol Kiko (prednostne pre PMD 85-1)      |
+| TENISS   | JUMP 7000 | 2,2A     | ?                                         |
+| ZABY     | JUMP 1500 | 1,2,2A,3 | ?                                         |
+| ZED      | JUMP 1000 | 1,2,2A,3 | R.D.                                      |
+| CROSFIRE | JUMP 0000 | 1        | ?                                         |
+| AIR RAID | JUMP 1000 | 1,2,2A,3 | ? (NITRA 1987)                            |
+| REVERZ   | JUMP 0000 | 1,2,2A,3 | SEN SOFTWARE                              |
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+* games-2.ptp *
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+| Meno     | Spustenie | Model    | Autor                                     |
+-------------------------------------------------------------------------------
+| GALAXIA  | AutoRun   | 1,2,2A   | Petr Tuma (CERES SOFT)                    |
+| GLUTTON  | AutoRun   | 1,2,2A,3 | Jaroslav Szczurek, Peter Gregorovic       |
+| GRDEMO   | AutoRun   | 1,2,2A,3 | Petr Tuma (CERES SOFT)                    |
+| JASON    | AutoRun   | 1,2,2A,3 | Petr Tuma (CERES SOFT)                    |
+| KANKAN   | JUMP 0000 | 1,2,2A,3 | ?                                         |
+| MESTO    | AutoRun   | 1,2,2A   | Vit Libovicky (heslo: konvalinka)         |
+| MANIC+   | AutoRun   | 1        | Vit Libovicky, Daniel Jenne               |
+| MANIC+2  | AutoRun   | 2,2A,3   | Vit Libovicky, Daniel Jenne               |
+| PAMPUCH  | AutoRun   | 1        | D. Blasko                                 |
+| PAMPUCHX | AutoRun   | 1        | D. Blasko (255 zivotov)                   |
+| ON&DUCH4 | AutoRun   | 1        | D. Blasko (s hudobnym podmazom)           |
+| SPACE-RA | AutoRun   | 1        | Dusan Kertes                              |
+| SP'DEMIS | AutoRun   | 1        | Ján Micheľ, Igor Kolla                    |
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+* games-3.ptp *
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+| Meno     | Spustenie | Model    | Autor                                     |
+-------------------------------------------------------------------------------
+| CATEGORI | JUMP 1000 | 1        | Miroslav Urda                             |
+| COBRA    | JUMP 5B00 | 1        | Miroslav Urda                             |
+| STRIPPED | AutoRun   | 1        | Miroslav Urda                             |
+| PANGO    | AutoRun   | 1        | Miroslav Urda                             |
+| MISSION  | AutoRun   | 1        | Miroslav Urda                             |
+| RESCUER  | AutoRun   | 1        | Miroslav Urda, OK soft                    |
+| MICRHYTM | AutoRun   | 1        | Miroslav Urda                             |
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+* games-other.p32 *
+-------------------------------------------------------------------------------
+
+Na diskete sa nachadza automaticky zavadzac programov RUNNER a po nabootovani
+staci zadat prikaz RUN. V nom je mozne si vybrat spustenie konkretnej hry.
+
+-------------------------------------------------------------------------------
+* games-other.mrm *
+-------------------------------------------------------------------------------
+
+Obraz MRM ma na zaciatku MRM Booter, ktory zobrazi zoznam hier a umozni ich
+spustenie.
