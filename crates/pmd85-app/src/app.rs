@@ -860,6 +860,17 @@ impl App {
     pub(crate) fn run_frames(&mut self, frames: u64) {
         for _ in 0..frames {
             self.machine.step_frame();
+            if self.machine.breakpoint_hit().is_some() {
+                // A breakpoint stopped the machine mid-frame: stop
+                // pumping the tape deck (it must stay in lockstep
+                // with the machine) and pause the transport.
+                self.running = false;
+                self.notify(format!(
+                    "Breakpoint at {:04X}",
+                    self.machine.breakpoint_hit().unwrap()
+                ));
+                return;
+            }
             if let Some(message) = self.tape.pump(&mut self.machine) {
                 self.notify(message);
             }

@@ -509,6 +509,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A breakpoint mid-frame pauses the transport and the tape deck
+    /// (the pump must stay in lockstep with the machine); continuing
+    /// runs on without re-tripping the same address.
+    #[test]
+    fn breakpoint_pauses_the_run_mid_frame() {
+        let mut app = test_app();
+        // The very first boot instruction (0x0000 under the startup
+        // shadow map) carries a breakpoint: the first emulated frame
+        // must stop right there and pause the transport.
+        app.machine.toggle_breakpoint(0x0000);
+        app.run_frames(5);
+        assert!(!app.running, "transport paused at the breakpoint");
+        assert_eq!(app.machine.breakpoint_hit(), Some(0x0000));
+        assert_eq!(app.machine.cpu.pc, 0x0000);
+        assert!(
+            app.machine.bus.total_cycles() < pmd85_core::machine::CYCLES_PER_FRAME,
+            "stopped mid-frame, not after it"
+        );
+
+        // Continuing boots on without re-tripping the hit address.
+        app.machine.resume();
+        app.set_running(true);
+        app.run_frames(5);
+        assert!(app.running, "no re-trip at the hit address");
+        assert_eq!(app.machine.breakpoint_hit(), None);
+        assert!(
+            app.machine.bus.total_cycles() >= 4 * pmd85_core::machine::CYCLES_PER_FRAME,
+            "the frames really ran"
+        );
+    }
+
     #[test]
     fn audio_gating() {
         let mut app = test_app();

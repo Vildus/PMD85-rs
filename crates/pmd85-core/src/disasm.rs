@@ -158,6 +158,14 @@ fn instruction_len(op: u8) -> usize {
     }
 }
 
+/// Whether the opcode is a CALL — the unconditional one plus the
+/// conditional calls (the debugger's step-over runs over these).
+/// The undocumented opcodes that alias the conditional-call bit
+/// pattern (DD, ED, FD) are not.
+pub fn is_call(op: u8) -> bool {
+    op == 0xCD || (op & 0xC7 == 0xC4 && !matches!(op, 0xDD | 0xED | 0xFD))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

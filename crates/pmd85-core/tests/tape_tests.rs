@@ -168,6 +168,41 @@ fn flash_block_read_contract() {
     assert!(!machine.bus.tape.is_playing(), "session over");
 }
 
+/// Breakpoints set at addresses the flow never visits leave the
+/// flash-load interception (which lives inside the same instruction
+/// step) completely alone: same load, same end state.
+#[test]
+fn flash_load_with_breakpoints_set() {
+    let mut machine = boot();
+    let data = [9u8, 8, 7, 6];
+    let checksum = data.iter().fold(0u8, |a, &b| a.wrapping_add(b));
+    machine.bus.tape_play_session(vec![PlayItem {
+        data: [data.as_slice(), &[checksum]].concat(),
+        head: false,
+        flash: true,
+    }]);
+    machine.toggle_breakpoint(0xFFF8); // VRAM, never executed
+    machine.toggle_breakpoint(0x0502); // parked code, never reached
+    assert_eq!(machine.breakpoints().len(), 2);
+
+    machine.bus.memory.ram[0x0500] = 0x76;
+    machine.cpu.pc = 0xEDC4;
+    machine.cpu.sp = 0xBEF0;
+    machine.bus.memory.ram[0xBEF0] = 0x00;
+    machine.bus.memory.ram[0xBEF1] = 0x05;
+    machine.cpu.h = 0x20;
+    machine.cpu.l = 0x00;
+    machine.cpu.d = 0x00;
+    machine.cpu.e = data.len() as u8 - 1;
+    machine.cpu.c = 1;
+    machine.run_cycles(100);
+
+    assert_eq!(&machine.bus.memory.ram[0x2000..0x2004], &data, "data written");
+    assert!(machine.cpu.halted, "returned through the routine's RET");
+    assert_eq!(machine.breakpoint_hit(), None, "nothing tripped");
+    assert_eq!(machine.cpu.pc, 0x0501);
+}
+
 /// With C = 0 (check mode) the block-read intercept verifies the
 /// checksum without writing anything.
 #[test]

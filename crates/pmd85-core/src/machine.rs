@@ -16,6 +16,8 @@ use crate::model::Model;
 use crate::state::{StateError, StateReader, StateWriter};
 use crate::tapedeck::{PlayItem, TapeDeck};
 
+use std::collections::HashSet;
+
 /// CPU clock: Tesla MHB8080A at 2.048 MHz.
 pub const CPU_CLOCK_HZ: u64 = 2_048_000;
 /// Video refresh rate.
@@ -363,6 +365,16 @@ impl Bus for MachineBus {
 pub struct Machine {
     pub cpu: Cpu,
     pub bus: MachineBus,
+    /// Debugger breakpoints (session-only: not part of save states).
+    breakpoints: HashSet<u16>,
+    /// The address the last breakpoint stopped at, if any.
+    breakpoint_hit: Option<u16>,
+    /// Whether the run loop stops at breakpoints (a hit disarms
+    /// until [`Machine::resume`] or [`Machine::step_once`] re-arms).
+    breakpoints_armed: bool,
+    /// Skip the breakpoint check for one instruction (the resume
+    /// path, so the hit address executes once without re-tripping).
+    breakpoint_skip: bool,
 }
 
 impl Machine {
@@ -370,6 +382,10 @@ impl Machine {
         Machine {
             cpu: Cpu::new(),
             bus: MachineBus::new(model, monitor, rom_module),
+            breakpoints: HashSet::new(),
+            breakpoint_hit: None,
+            breakpoints_armed: true,
+            breakpoint_skip: false,
         }
     }
 
@@ -401,23 +417,105 @@ impl Machine {
         self.run_cycles(CYCLES_PER_FRAME);
     }
 
-    /// Run a number of CPU cycles (used by tests and future debugger).
+    /// Run a number of CPU cycles (used by tests and the debugger).
+    /// Stops early, exactly at a breakpoint: the PC then sits on the
+    /// breakpoint address, before its instruction executes.
     pub fn run_cycles(&mut self, cycles: u64) {
         let target = self.bus.total_cycles() + cycles;
         while self.bus.total_cycles() < target {
-            self.tape_flash_intercept();
-            let c = self.cpu.step(&mut self.bus) as u64;
-            self.bus.advance_time(c);
+            if !self.step_checked() {
+                return;
+            }
         }
     }
 
     /// Execute exactly one CPU instruction (or interrupt), advancing
-    /// peripheral clocks. Returns the cycles consumed.
+    /// peripheral clocks. Returns the cycles consumed. Never stops at
+    /// a breakpoint; re-arms them for the next run.
     pub fn step_once(&mut self) -> u32 {
+        self.breakpoint_hit = None;
+        self.breakpoints_armed = true;
+        self.breakpoint_skip = false;
+        self.step_instruction()
+    }
+
+    /// One instruction through the flash-load interception and the
+    /// breakpoint machinery. Returns false when an (armed) breakpoint
+    /// stopped the run before the instruction at the PC executed.
+    fn step_checked(&mut self) -> bool {
+        if self.breakpoint_skip {
+            self.breakpoint_skip = false;
+        } else if self.breakpoints_armed && self.breakpoints.contains(&self.cpu.pc) {
+            self.breakpoint_hit = Some(self.cpu.pc);
+            self.breakpoints_armed = false;
+            return false;
+        }
+        self.step_instruction();
+        true
+    }
+
+    /// The raw instruction step: flash-load interception, CPU step,
+    /// peripheral clock advance.
+    fn step_instruction(&mut self) -> u32 {
         self.tape_flash_intercept();
         let c = self.cpu.step(&mut self.bus) as u64;
         self.bus.advance_time(c);
         c as u32
+    }
+
+    // ----- breakpoints ---------------------------------------------------
+
+    /// Toggle a breakpoint at `addr`. Returns true when it is now
+    /// set, false when it was removed.
+    pub fn toggle_breakpoint(&mut self, addr: u16) -> bool {
+        if self.breakpoints.remove(&addr) {
+            false
+        } else {
+            self.breakpoints.insert(addr);
+            true
+        }
+    }
+
+    /// The set breakpoint addresses.
+    pub fn breakpoints(&self) -> &HashSet<u16> {
+        &self.breakpoints
+    }
+
+    /// The address the last breakpoint stopped at, if any.
+    pub fn breakpoint_hit(&self) -> Option<u16> {
+        self.breakpoint_hit
+    }
+
+    /// Continue after a breakpoint hit: breakpoints re-arm, and the
+    /// instruction at the hit address executes once unchecked so the
+    /// same hit does not immediately repeat.
+    pub fn resume(&mut self) {
+        self.breakpoint_hit = None;
+        self.breakpoints_armed = true;
+        self.breakpoint_skip = true;
+    }
+
+    /// Debugger step-over: a single step — unless the instruction at
+    /// the PC is a CALL, in which case the whole call runs until the
+    /// PC is the return address (or a breakpoint stops inside). A
+    /// cycle cap keeps a call that never returns from hanging the
+    /// caller.
+    pub fn step_over(&mut self) {
+        let opcode = self.bus.read(self.cpu.pc);
+        if !crate::disasm::is_call(opcode) {
+            self.step_once();
+            return;
+        }
+        let ret = self.cpu.pc.wrapping_add(3);
+        self.breakpoint_hit = None;
+        self.breakpoints_armed = true;
+        self.breakpoint_skip = false;
+        let deadline = self.bus.total_cycles() + CYCLES_PER_FRAME * 10;
+        while self.bus.total_cycles() < deadline && self.cpu.pc != ret {
+            if !self.step_checked() {
+                return;
+            }
+        }
     }
 
     /// Flash-load interception of the monitor ROM's tape read loops,
@@ -623,6 +721,83 @@ mod tests {
 
     fn rom(size: usize) -> Vec<u8> {
         vec![0x00; size]
+    }
+
+    /// A fresh 85-3 with the startup shadow map dropped, so code in
+    /// RAM runs: `prog` lands at 0x0500, the PC starts on it.
+    fn code(prog: &[u8]) -> Machine {
+        let mut m = Machine::new(Model::Pmd853, &rom(0x2000), None);
+        m.bus.io_write(0x87, 0x00); // any write clears the startup map
+        m.bus.memory.ram[0x0500..0x0500 + prog.len()].copy_from_slice(prog);
+        m.cpu.pc = 0x0500;
+        m.cpu.sp = 0x0F00;
+        m
+    }
+
+    /// Breakpoints stop the run exactly at the address, before its
+    /// instruction executes; a step re-arms them; resume runs the hit
+    /// address once unchecked before checking again.
+    #[test]
+    fn breakpoints_stop_step_and_resume() {
+        // 0x0500: NOP ; NOP ; JMP 0500 — a tight loop over the
+        // breakpoint at 0x0502.
+        let mut m = code(&[0x00, 0x00, 0xC3, 0x00, 0x05]);
+
+        assert!(m.toggle_breakpoint(0x0502), "now set");
+        assert_eq!(m.breakpoints().len(), 1);
+        m.run_cycles(100_000);
+        assert_eq!(m.breakpoint_hit(), Some(0x0502));
+        assert_eq!(m.cpu.pc, 0x0502, "stopped exactly at the breakpoint");
+        assert_eq!(m.bus.total_cycles(), 8, "exactly the two NOPs ran");
+
+        // A step executes the JMP (re-armed) and the next run trips
+        // again on arrival.
+        m.step_once();
+        assert_eq!(m.cpu.pc, 0x0500, "the JMP executed");
+        assert_eq!(m.breakpoint_hit(), None, "the step clears the hit");
+        m.run_cycles(100_000);
+        assert_eq!(m.breakpoint_hit(), Some(0x0502));
+        assert_eq!(m.bus.total_cycles(), 26, "JMP + NOP + NOP ran");
+
+        // Resume: the instruction at the hit address runs once
+        // unchecked (cycles advance by the whole lap), then the
+        // breakpoint trips again on arrival.
+        m.resume();
+        m.run_cycles(100_000);
+        assert_eq!(m.breakpoint_hit(), Some(0x0502));
+        assert_eq!(m.bus.total_cycles(), 44, "the hit address ran once");
+
+        // Removing the breakpoint frees the loop.
+        assert!(!m.toggle_breakpoint(0x0502), "now cleared");
+        assert!(m.breakpoints().is_empty());
+        m.resume();
+        m.run_cycles(1_000);
+        assert_eq!(m.breakpoint_hit(), None);
+    }
+
+    /// Step-over runs a whole CALL and lands on the return address;
+    /// over anything else it is a single step.
+    #[test]
+    fn step_over_crosses_a_call() {
+        // 0x0500: CALL 0506 ; 0x0503: HLT ; 0x0506: RET
+        let mut m = code(&[0xCD, 0x06, 0x05, 0x76, 0x00, 0x00, 0xC9]);
+        m.step_over();
+        assert_eq!(m.cpu.pc, 0x0503, "the call ran to its return address");
+        assert!(!m.cpu.halted, "the HLT past it did not run");
+        // Over the HLT (not a call): one plain step.
+        m.step_over();
+        assert!(m.cpu.halted, "HLT executed by the single step");
+    }
+
+    /// A breakpoint inside a called routine stops a step-over there.
+    #[test]
+    fn step_over_stops_at_a_breakpoint_inside() {
+        // 0x0500: CALL 0506 ; 0x0503: HLT ; 0x0506: MVI A,FF ; RET
+        let mut m = code(&[0xCD, 0x06, 0x05, 0x76, 0x00, 0x00, 0x3E, 0xFF, 0xC9]);
+        m.toggle_breakpoint(0x0508);
+        m.step_over();
+        assert_eq!(m.breakpoint_hit(), Some(0x0508));
+        assert_eq!(m.cpu.pc, 0x0508, "stopped inside the call, not over it");
     }
 
     #[test]
