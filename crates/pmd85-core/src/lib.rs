@@ -8,6 +8,7 @@ pub mod audio;
 pub mod bus;
 pub mod chips;
 pub mod cpu;
+pub mod disasm;
 pub mod keyboard;
 pub mod machine;
 pub mod model;
