@@ -146,6 +146,12 @@ pub enum HostShortcut {
     QuickSave,
     /// Alt+F9: restore the quick slot, no dialog.
     QuickLoad,
+    /// Alt+F10: execute exactly one instruction.
+    DebugStep,
+    /// Alt+F11: step over a CALL.
+    DebugStepOver,
+    /// Alt+F12: continue after a breakpoint.
+    DebugContinue,
 }
 
 /// The host-key shortcut bound to a physical key (checked only while
@@ -154,6 +160,9 @@ pub fn host_shortcut(code: KeyCode) -> Option<HostShortcut> {
     match code {
         KeyCode::F5 => Some(HostShortcut::QuickSave),
         KeyCode::F9 => Some(HostShortcut::QuickLoad),
+        KeyCode::F10 => Some(HostShortcut::DebugStep),
+        KeyCode::F11 => Some(HostShortcut::DebugStepOver),
+        KeyCode::F12 => Some(HostShortcut::DebugContinue),
         _ => None,
     }
 }
@@ -230,6 +239,9 @@ mod tests {
     fn host_shortcuts_live_in_the_alt_namespace() {
         assert_eq!(host_shortcut(KeyCode::F5), Some(HostShortcut::QuickSave));
         assert_eq!(host_shortcut(KeyCode::F9), Some(HostShortcut::QuickLoad));
+        assert_eq!(host_shortcut(KeyCode::F10), Some(HostShortcut::DebugStep));
+        assert_eq!(host_shortcut(KeyCode::F11), Some(HostShortcut::DebugStepOver));
+        assert_eq!(host_shortcut(KeyCode::F12), Some(HostShortcut::DebugContinue));
         assert_eq!(host_shortcut(KeyCode::F4), None);
         assert_eq!(host_shortcut(KeyCode::KeyS), None);
     }
@@ -251,5 +263,8 @@ mod tests {
         // collision the shortcuts would otherwise introduce).
         assert_eq!(keys_for(KeyCode::F5), &[Key::K4]);
         assert_eq!(keys_for(KeyCode::F9), &[Key::K8]);
+        assert_eq!(keys_for(KeyCode::F10), &[Key::K9]);
+        assert_eq!(keys_for(KeyCode::F11), &[Key::K10]);
+        assert_eq!(keys_for(KeyCode::F12), &[Key::K11]);
     }
 }

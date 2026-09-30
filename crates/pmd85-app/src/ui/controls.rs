@@ -151,6 +151,54 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                     app.set_turbo(!turbo);
                 }
 
+                ui.separator();
+
+                // ---- debugger ----
+                ui.strong("DEBUG");
+                if icon_button(
+                    ui,
+                    icon::STEPS,
+                    true,
+                    "Step one instruction (Alt+F10)",
+                    c(&theme.accent),
+                ) {
+                    app.debug_step();
+                }
+                if icon_button(
+                    ui,
+                    icon::SKIP_FORWARD,
+                    true,
+                    "Step over a call (Alt+F11)",
+                    c(&theme.accent),
+                ) {
+                    app.debug_step_over();
+                }
+                if icon_button(
+                    ui,
+                    icon::PLAY,
+                    true,
+                    "Continue after a breakpoint (Alt+F12)",
+                    c(&theme.accent),
+                ) {
+                    app.debug_continue();
+                }
+                // The debugger panels as dock tabs.
+                let cpu = egui::Button::new(egui::RichText::new(icon::CPU).size(14.0))
+                    .selected(dock::tab_visible(&app.ui.dock, dock::Tab::Cpu));
+                if ui.add(cpu).on_hover_text("CPU registers").clicked() {
+                    dock::toggle_tab(&mut app.ui.dock, dock::Tab::Cpu);
+                }
+                let dis = egui::Button::new(egui::RichText::new(icon::LIST_BULLETS).size(14.0))
+                    .selected(dock::tab_visible(&app.ui.dock, dock::Tab::Disassembly));
+                if ui.add(dis).on_hover_text("Disassembly").clicked() {
+                    dock::toggle_tab(&mut app.ui.dock, dock::Tab::Disassembly);
+                }
+                let mem = egui::Button::new(egui::RichText::new(icon::MEMORY).size(14.0))
+                    .selected(dock::tab_visible(&app.ui.dock, dock::Tab::Memory));
+                if ui.add(mem).on_hover_text("Memory dump").clicked() {
+                    dock::toggle_tab(&mut app.ui.dock, dock::Tab::Memory);
+                }
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Settings gear (a floating window, not a tab).
                     let gear = egui::Button::new(egui::RichText::new(icon::GEAR).size(14.0))

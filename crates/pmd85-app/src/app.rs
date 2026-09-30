@@ -851,6 +851,29 @@ impl App {
 
     // ----- emulation -----
 
+    /// Debugger: execute exactly one instruction. The transport
+    /// pauses for it (a running machine would immediately race past
+    /// the step).
+    pub fn debug_step(&mut self) {
+        self.set_running(false);
+        self.machine.step_once();
+    }
+
+    /// Debugger: step over a CALL (or a single instruction).
+    pub fn debug_step_over(&mut self) {
+        self.set_running(false);
+        self.machine.step_over();
+    }
+
+    /// Debugger: continue — re-arm breakpoints after a hit and run.
+    /// Away from a breakpoint it is a plain Run.
+    pub fn debug_continue(&mut self) {
+        if self.machine.breakpoint_hit().is_some() {
+            self.machine.resume();
+        }
+        self.set_running(true);
+    }
+
     /// Run `frames` emulated frames, pumping the tape deck between
     /// them. The pump must run per *emulated* frame, not per rendered
     /// frame: at a speedup several emulated frames pass per render

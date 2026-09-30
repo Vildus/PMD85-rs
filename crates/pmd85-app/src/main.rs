@@ -124,6 +124,15 @@ impl ApplicationHandler for Application {
                                     Some(keys::HostShortcut::QuickLoad) => {
                                         self.app.quick_load_state()
                                     }
+                                    Some(keys::HostShortcut::DebugStep) => {
+                                        self.app.debug_step()
+                                    }
+                                    Some(keys::HostShortcut::DebugStepOver) => {
+                                        self.app.debug_step_over()
+                                    }
+                                    Some(keys::HostShortcut::DebugContinue) => {
+                                        self.app.debug_continue()
+                                    }
                                     None => {}
                                 }
                             }

@@ -6,7 +6,7 @@
 
 use crate::app::App;
 use crate::ui::theme::Theme;
-use crate::ui::{keyboard, screen, tape};
+use crate::ui::{debug, keyboard, screen, tape};
 use egui::{Color32, CornerRadius, Stroke};
 use egui_dock::tab_viewer::OnCloseResponse;
 use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
@@ -21,6 +21,12 @@ pub enum Tab {
     Keyboard,
     /// The cassette tape editor.
     Tape,
+    /// The CPU registers and flags.
+    Cpu,
+    /// The disassembly with breakpoints.
+    Disassembly,
+    /// The memory dump.
+    Memory,
 }
 
 impl Tab {
@@ -30,6 +36,9 @@ impl Tab {
             Tab::Screen => "Screen",
             Tab::Keyboard => "Keyboard",
             Tab::Tape => "Cassette tape",
+            Tab::Cpu => "CPU",
+            Tab::Disassembly => "Disassembly",
+            Tab::Memory => "Memory",
         }
     }
 }
@@ -175,6 +184,9 @@ impl TabViewer for Viewer<'_> {
             Tab::Screen => screen::draw(ui, self.app),
             Tab::Keyboard => keyboard::ui(ui, self.app),
             Tab::Tape => tape::ui(ui, self.app),
+            Tab::Cpu => debug::cpu(ui, self.app),
+            Tab::Disassembly => debug::listing(ui, self.app),
+            Tab::Memory => debug::memory(ui, self.app),
         };
     }
 

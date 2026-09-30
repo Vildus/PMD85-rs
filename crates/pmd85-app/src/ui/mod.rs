@@ -4,6 +4,7 @@
 //! later move into an `egui_dock` tree unchanged.
 
 pub mod controls;
+pub mod debug;
 pub mod dock;
 pub mod keyboard;
 pub mod screen;
@@ -24,6 +25,8 @@ pub struct UiState {
     /// tree itself is the visibility state, and it persists in
     /// `layout.json`.
     pub dock: egui_dock::DockState<dock::Tab>,
+    /// Debugger view state (disassembly anchor, memory dump).
+    pub debug: crate::ui::debug::DebugState,
     /// Metadata entry form for a pending tape import.
     pub tape_import: Option<crate::ui::tape::ImportDraft>,
     /// A configuration awaiting the "restart machine?" confirmation.
@@ -44,6 +47,7 @@ impl Default for UiState {
         UiState {
             settings_open: false,
             dock: dock::default_dock(),
+            debug: crate::ui::debug::DebugState::default(),
             tape_import: None,
             confirm_reboot: None,
             theme_customize: false,
@@ -249,6 +253,49 @@ mod tests {
                         name: "RAW".into(),
                         start: "1000".into(),
                     });
+                }),
+            ),
+            (
+                "debugger-open",
+                Box::new(|a| {
+                    for tab in [
+                        crate::ui::dock::Tab::Cpu,
+                        crate::ui::dock::Tab::Disassembly,
+                        crate::ui::dock::Tab::Memory,
+                    ] {
+                        crate::ui::dock::show_tab(&mut a.ui.dock, tab);
+                    }
+                }),
+            ),
+            (
+                "debugger-at-breakpoint",
+                Box::new(|a| {
+                    for tab in [
+                        crate::ui::dock::Tab::Cpu,
+                        crate::ui::dock::Tab::Disassembly,
+                        crate::ui::dock::Tab::Memory,
+                    ] {
+                        crate::ui::dock::show_tab(&mut a.ui.dock, tab);
+                    }
+                    // Stop the monitor somewhere in its boot.
+                    a.machine.toggle_breakpoint(0x0000);
+                    a.run_frames(1);
+                }),
+            ),
+            (
+                "debugger-halted",
+                Box::new(|a| {
+                    crate::ui::dock::show_tab(&mut a.ui.dock, crate::ui::dock::Tab::Cpu);
+                    a.machine.cpu.halted = true;
+                    a.set_running(false);
+                }),
+            ),
+            (
+                "debugger-follow-off",
+                Box::new(|a| {
+                    crate::ui::dock::show_tab(&mut a.ui.dock, crate::ui::dock::Tab::Disassembly);
+                    a.ui.debug.follow_pc = false;
+                    a.ui.debug.anchor = 0xE000;
                 }),
             ),
         ];
@@ -538,6 +585,84 @@ mod tests {
             app.machine.bus.total_cycles() >= 4 * pmd85_core::machine::CYCLES_PER_FRAME,
             "the frames really ran"
         );
+    }
+
+    /// An app whose machine is booted past the startup shadow map
+    /// (the monitor's first I/O write clears it), so programs placed
+    /// in RAM actually run.
+    fn ram_app() -> App {
+        let mut app = test_app();
+        for _ in 0..100 {
+            if !app.machine.bus.memory.startup_map() {
+                return app;
+            }
+            app.run_frames(1);
+        }
+        panic!("the monitor never cleared the startup shadow map");
+    }
+
+    /// Stepping through a program lands exactly where the
+    /// disassembler predicted, instruction by instruction.
+    #[test]
+    fn stepping_follows_the_disassembly() {
+        let mut app = ram_app();
+        // A small straight-line program in RAM: MVI A,42 ; MVI B,10 ;
+        // ADD B ; HLT. (Control flow is exercised by the step-over
+        // test below.)
+        let prog: [u8; 6] = [0x3E, 0x42, 0x06, 0x10, 0x80, 0x76];
+        app.machine.bus.memory.ram[0x0500..0x0506].copy_from_slice(&prog);
+        app.machine.cpu.pc = 0x0500;
+        app.set_running(false);
+
+        // Predict the instruction chain with the disassembler.
+        let read = |a: u16| app.machine.bus.memory.read(a);
+        let mut chain = Vec::new();
+        let mut addr = 0x0500u16;
+        for _ in 0..10 {
+            chain.push(addr);
+            let bytes = [read(addr), read(addr.wrapping_add(1)), read(addr.wrapping_add(2))];
+            let (_, len) = pmd85_core::disasm::disassemble(addr, &bytes);
+            addr = addr.wrapping_add(len as u16);
+            if addr > 0x0505 {
+                break;
+            }
+        }
+        assert_eq!(
+            chain,
+            vec![0x0500, 0x0502, 0x0504, 0x0505],
+            "MVI, MVI, ADD, HLT"
+        );
+
+        // Each step lands on the next predicted address; the machine
+        // stays paused for it.
+        for want in chain {
+            assert_eq!(app.machine.cpu.pc, want);
+            app.debug_step();
+            assert!(!app.running, "stepping keeps the transport paused");
+        }
+        assert!(app.machine.cpu.halted, "the final HLT executed");
+        assert_eq!(app.machine.cpu.a, 0x52, "ADD B ran: 0x42 + 0x10");
+    }
+
+    /// Step-over crosses a CALL to its return address; over anything
+    /// else it is a single step.
+    #[test]
+    fn step_over_crosses_a_call_in_the_app() {
+        let mut app = ram_app();
+        // CALL 0506 ; HLT ; MVI A,FF ; RET
+        let prog: [u8; 9] = [0xCD, 0x06, 0x05, 0x76, 0x00, 0x00, 0x3E, 0xFF, 0xC9];
+        app.machine.bus.memory.ram[0x0500..0x0509].copy_from_slice(&prog);
+        app.machine.cpu.pc = 0x0500;
+        app.set_running(false);
+
+        app.debug_step_over();
+        assert_eq!(app.machine.cpu.pc, 0x0503, "the call ran whole");
+        assert!(!app.machine.cpu.halted, "the HLT past it did not run");
+        assert_eq!(app.machine.cpu.a, 0xFF, "the routine really executed");
+
+        // Over the HLT: one plain step.
+        app.debug_step_over();
+        assert!(app.machine.cpu.halted);
     }
 
     #[test]
