@@ -31,22 +31,14 @@ pub struct ImportDraft {
     pub start: String,
 }
 
-pub fn draw(ctx: &egui::Context, app: &mut App) {
-    let mut open = app.ui.tape_open;
-    egui::Window::new("Cassette tape")
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(true)
-        .default_width(520.0)
-        .show(ctx, |ui| {
-            let theme = app.active_theme_data();
-            toolbar(ui, app, &theme);
-            ui.add_space(4.0);
-            file_list(ui, app, &theme);
-            ui.add_space(4.0);
-            status(ui, app, &theme);
-        });
-    app.ui.tape_open = open;
+/// The panel body, drawn inside its dock tab.
+pub fn ui(ui: &mut egui::Ui, app: &mut App) {
+    let theme = app.active_theme_data();
+    toolbar(ui, app, &theme);
+    ui.add_space(4.0);
+    file_list(ui, app, &theme);
+    ui.add_space(4.0);
+    status(ui, app, &theme);
 }
 
 /// New / Open / Save / Import / Export + per-file actions.

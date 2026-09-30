@@ -359,53 +359,46 @@ fn legend(ui: &mut egui::Ui, theme: &Theme) {
     });
 }
 
-pub fn draw(ctx: &egui::Context, app: &mut App) {
-    let mut open = app.ui.keyboard_open;
-    egui::Window::new("Keyboard layout")
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(true)
-        .show(ctx, |ui| {
-            let theme = app.active_theme_data();
-            legend(ui, &theme);
-            ui.label(
-                egui::RichText::new(
-                    "Host keys: hold left Alt to pause key mapping \u{2014} \
-                     Alt+F5 quick-saves a state, Alt+F9 restores it.",
-                )
-                .size(10.0)
-                .color(Theme::color(&theme.text_weak)),
-            );
-            ui.add_space(4.0);
-            let kb = app.machine.bus.keyboard.clone();
-            let rows = main_block();
-            let total = block_size(&rows);
-            // auto_shrink: the window opens at the content size (no
-            // scrollbars); scrolling only kicks in if the user shrinks
-            // the resizable window below it.
-            egui::ScrollArea::both()
-                .auto_shrink(true)
-                .show(ui, |ui| {
-                    let (rect, _) = ui.allocate_exact_size(total, egui::Sense::click());
-                    draw_block(ui.painter(), rect.min, &rows, &theme, &kb);
-                    // Click-to-press: the cap under a held pointer
-                    // button is pressed, sliding slides the keypress.
-                    let held = if ui.input(|i| i.pointer.primary_down()) {
-                        ui.input(|i| i.pointer.interact_pos())
-                            .and_then(|pos| hit_cap(rect.min, &rows, pos))
-                    } else {
-                        None
-                    };
-                    apply_pointer(app, held);
-                });
+/// The panel body, drawn inside its dock tab.
+pub fn ui(ui: &mut egui::Ui, app: &mut App) {
+    let theme = app.active_theme_data();
+    legend(ui, &theme);
+    ui.label(
+        egui::RichText::new(
+            "Host keys: hold left Alt to pause key mapping \u{2014} \
+             Alt+F5 quick-saves a state, Alt+F9 restores it.",
+        )
+        .size(10.0)
+        .color(Theme::color(&theme.text_weak)),
+    );
+    ui.add_space(4.0);
+    let kb = app.machine.bus.keyboard.clone();
+    let rows = main_block();
+    let total = block_size(&rows);
+    // auto_shrink: the tab opens at the content size (no
+    // scrollbars); scrolling only kicks in if the user shrinks the
+    // dock pane below it.
+    egui::ScrollArea::both()
+        .auto_shrink(true)
+        .show(ui, |ui| {
+            let (rect, _) = ui.allocate_exact_size(total, egui::Sense::click());
+            draw_block(ui.painter(), rect.min, &rows, &theme, &kb);
+            // Click-to-press: the cap under a held pointer
+            // button is pressed, sliding slides the keypress.
+            let held = if ui.input(|i| i.pointer.primary_down()) {
+                ui.input(|i| i.pointer.interact_pos())
+                    .and_then(|pos| hit_cap(rect.min, &rows, pos))
+            } else {
+                None
+            };
+            apply_pointer(app, held);
         });
-    if open != app.ui.keyboard_open {
-        app.ui.keyboard_open = open;
-    }
-    // Closing the window must release a pointer-held key.
-    if !app.ui.keyboard_open {
-        apply_pointer(app, None);
-    }
+}
+
+/// Release a pointer-held key (the panel is closing or being
+/// hidden; nothing will call [`apply_pointer`] again).
+pub fn release_pointer(app: &mut App) {
+    apply_pointer(app, None);
 }
 
 #[cfg(test)]

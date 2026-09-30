@@ -4,6 +4,7 @@
 //! later move into an `egui_dock` tree unchanged.
 
 pub mod controls;
+pub mod dock;
 pub mod keyboard;
 pub mod screen;
 pub mod settings;
@@ -14,14 +15,15 @@ pub mod theme;
 use crate::app::App;
 
 /// UI-only state (windows, dialogs), distinct from emulator state.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct UiState {
-    /// The settings window.
+    /// The settings window (a floating dialog).
     pub settings_open: bool,
-    /// The keyboard layout reference window.
-    pub keyboard_open: bool,
-    /// The cassette tape editor window.
-    pub tape_open: bool,
+    /// The dock layout: which panels are visible and where they are
+    /// docked. Replaces the former per-window `*_open` flags — the
+    /// tree itself is the visibility state, and it persists in
+    /// `layout.json`.
+    pub dock: egui_dock::DockState<dock::Tab>,
     /// Metadata entry form for a pending tape import.
     pub tape_import: Option<crate::ui::tape::ImportDraft>,
     /// A configuration awaiting the "restart machine?" confirmation.
@@ -37,15 +39,30 @@ pub struct UiState {
     pub mouse_rst: bool,
 }
 
+impl Default for UiState {
+    fn default() -> Self {
+        UiState {
+            settings_open: false,
+            dock: dock::default_dock(),
+            tape_import: None,
+            confirm_reboot: None,
+            theme_customize: false,
+            theme_draft: None,
+            mouse_key: None,
+            mouse_rst: false,
+        }
+    }
+}
+
 /// Draw the whole UI for one frame (between `begin_pass`/`end_pass`).
 /// `ui` is the root Ui covering the window.
 pub fn draw(app: &mut App, ui: &mut egui::Ui) {
     controls::draw(ui, app);
     status::draw(ui, app);
-    screen::draw(ui, app);
+    // Everything between the bars is the dock area; the screen is its
+    // non-closable center tab, the tools dock around it.
+    dock::draw(ui, app);
     let ctx = ui.ctx().clone();
-    keyboard::draw(&ctx, app);
-    tape::draw(&ctx, app);
     settings::draw(&ctx, app);
     draw_notifications(&ctx, app);
 }
@@ -135,7 +152,7 @@ mod tests {
             ),
             (
                 "keyboard-open",
-                Box::new(|a| a.ui.keyboard_open = true),
+                Box::new(|a| crate::ui::dock::show_tab(&mut a.ui.dock, crate::ui::dock::Tab::Keyboard)),
             ),
             (
                 "settings-changed",
@@ -161,12 +178,12 @@ mod tests {
             ),
             (
                 "tape-open",
-                Box::new(|a| a.ui.tape_open = true),
+                Box::new(|a| crate::ui::dock::show_tab(&mut a.ui.dock, crate::ui::dock::Tab::Tape)),
             ),
             (
                 "tape-with-file",
                 Box::new(|a| {
-                    a.ui.tape_open = true;
+                    crate::ui::dock::show_tab(&mut a.ui.dock, crate::ui::dock::Tab::Tape);
                     let block = pmd85_core::tape::make_file(
                         0,
                         b'?',
@@ -182,7 +199,7 @@ mod tests {
             (
                 "tape-playing",
                 Box::new(|a| {
-                    a.ui.tape_open = true;
+                    crate::ui::dock::show_tab(&mut a.ui.dock, crate::ui::dock::Tab::Tape);
                     a.tape.flash = false;
                     let block = pmd85_core::tape::make_file(
                         0,
@@ -199,7 +216,7 @@ mod tests {
             (
                 "tape-flash-loading",
                 Box::new(|a| {
-                    a.ui.tape_open = true;
+                    crate::ui::dock::show_tab(&mut a.ui.dock, crate::ui::dock::Tab::Tape);
                     let block = pmd85_core::tape::make_file(
                         0,
                         b'?',
@@ -215,7 +232,7 @@ mod tests {
             (
                 "tape-import-form",
                 Box::new(|a| {
-                    a.ui.tape_open = true;
+                    crate::ui::dock::show_tab(&mut a.ui.dock, crate::ui::dock::Tab::Tape);
                     let block = pmd85_core::tape::make_file(
                         0,
                         b'?',
@@ -406,9 +423,9 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_window_paints_within_the_screen() {
+    fn keyboard_tab_paints_within_the_screen() {
         let mut app = test_app();
-        app.ui.keyboard_open = true;
+        crate::ui::dock::show_tab(&mut app.ui.dock, crate::ui::dock::Tab::Keyboard);
         let ctx = app.ctx.clone();
         let screen = egui::vec2(1024.0, 768.0);
         let raw = egui::RawInput {
@@ -418,7 +435,7 @@ mod tests {
         let mut right_edge: f32 = 0.0;
         for _ in 0..10 {
             let out = ctx.run_ui(raw.clone(), |ui| {
-                crate::ui::keyboard::draw(ui.ctx(), &mut app);
+                crate::ui::dock::draw(ui, &mut app);
             });
             if let Some(bbox) = out
                 .shapes
@@ -433,20 +450,63 @@ mod tests {
             }
             out.drop_without_applying_deltas();
         }
-        assert!(right_edge > 100.0, "keyboard window never painted");
-        // The window must open at (at least) the content size: the
-        // full layout is painted, not squeezed into a narrow
-        // scrollable strip.
-        assert!(
-            right_edge > 480.0,
-            "keyboard window too narrow (right edge {right_edge:.0})"
-        );
+        // The dock (screen tab + the keyboard pane beside it) must
+        // paint across the area and never overflow the window.
+        assert!(right_edge > 100.0, "dock area never painted");
         assert!(
             right_edge <= screen.x + 1.0,
-            "keyboard window overflows the screen (right edge {:.0} > {:.0})",
+            "dock area overflows the screen (right edge {:.0} > {:.0})",
             right_edge,
             screen.x
         );
+    }
+
+    /// The dock layout persists through `layout.json`: what was
+    /// visible and docked when the app exited comes back, and a
+    /// corrupt file falls back to the default instead of panicking.
+    #[test]
+    fn dock_layout_survives_a_restart() {
+        let dir = state_scratch_dir("dock-layout");
+        let mut app = test_app();
+        app.set_settings_dir(dir.clone());
+        crate::ui::dock::show_tab(&mut app.ui.dock, crate::ui::dock::Tab::Keyboard);
+        crate::ui::dock::show_tab(&mut app.ui.dock, crate::ui::dock::Tab::Tape);
+        app.save_layout();
+        assert!(app.layout_path().unwrap().is_file());
+
+        let mut app2 = test_app();
+        app2.set_settings_dir(dir.clone());
+        app2.restore_layout();
+        assert!(crate::ui::dock::tab_visible(&app2.ui.dock, crate::ui::dock::Tab::Screen));
+        assert!(crate::ui::dock::tab_visible(&app2.ui.dock, crate::ui::dock::Tab::Keyboard));
+        assert!(crate::ui::dock::tab_visible(&app2.ui.dock, crate::ui::dock::Tab::Tape));
+
+        // A corrupt layout file must not take the app down.
+        std::fs::write(app.layout_path().unwrap(), "{ not json").unwrap();
+        let mut app3 = test_app();
+        app3.set_settings_dir(dir.clone());
+        app3.restore_layout();
+        assert_eq!(
+            app3.ui.dock.main_surface().num_tabs(),
+            1,
+            "falls back to the lone screen"
+        );
+
+        // A layout without the (non-closable) screen tab is refused
+        // as well — it cannot happen through the UI, only by hand
+        // editing the file.
+        let screenless =
+            serde_json::to_string(&crate::ui::dock::default_dock()).unwrap();
+        let screenless = screenless.replace("\"Screen\"", "\"Keyboard\"");
+        std::fs::write(app.layout_path().unwrap(), screenless).unwrap();
+        let mut app4 = test_app();
+        app4.set_settings_dir(dir.clone());
+        app4.restore_layout();
+        assert!(
+            crate::ui::dock::tab_visible(&app4.ui.dock, crate::ui::dock::Tab::Screen),
+            "screen-less layout replaced by the default"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

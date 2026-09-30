@@ -160,9 +160,11 @@ impl ApplicationHandler for Application {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-        // Remember the session (the tape) before the process goes
-        // away; settings are already written on every change.
+        // Remember the session (the tape) and the dock layout before
+        // the process goes away; settings are already written on
+        // every change.
         self.app.save_session();
+        self.app.save_layout();
     }
 }
 
@@ -238,8 +240,10 @@ fn main() {
     let ctx = Context::default();
     let mut app = App::new(ctx, &args, settings);
     // The session (the tape that was loaded when the app last
-    // exited) comes back; a missing snapshot is a clean start.
+    // exited) and the dock layout come back; a missing snapshot is a
+    // clean start.
     app.restore_session();
+    app.restore_layout();
 
     let event_loop = EventLoop::new().expect("cannot create event loop");
     let mut application = Application {

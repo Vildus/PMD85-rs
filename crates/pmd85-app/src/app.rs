@@ -19,6 +19,29 @@ use crate::speed::{Pacer, SPEED_MAX, SPEED_MIN, TURBO_BUDGET};
 use crate::ui::theme::Theme;
 use crate::ui::UiState;
 
+/// egui_dock's serde support writes runtime-only rect coordinates
+/// (`x`/`y` of `Pos2`) as JSON `null` when they hold non-finite
+/// floats — and then cannot read its own output back (`null` where
+/// an `f32` is expected). Those coordinates are stale runtime state
+/// (recomputed on the next UI pass), so replace the nulls with
+/// zeros and the layout parses again. Other nulls (e.g.
+/// `focused_surface`) are legitimate and stay.
+pub(crate) fn sanitize_layout(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, val) in map.iter_mut() {
+                if (key == "x" || key == "y") && val.is_null() {
+                    *val = serde_json::json!(0.0);
+                } else {
+                    sanitize_layout(val);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(sanitize_layout),
+        _ => {}
+    }
+}
+
 /// Emulated screen size (pixels).
 pub const SCREEN: (usize, usize) = (WIDTH, HEIGHT);
 /// How long a notification popup stays on screen.
@@ -772,6 +795,57 @@ impl App {
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => log::warn!("cannot read the session tape: {e}"),
+        }
+    }
+
+    // ----- dock layout (remembered across restarts) ------------------
+
+    /// Where the dock layout lives: `layout.json` next to the
+    /// persisted settings.
+    pub(crate) fn layout_path(&self) -> Option<PathBuf> {
+        self.settings_dir.as_ref().map(|dir| dir.join("layout.json"))
+    }
+
+    /// Remember the dock layout: which panels are visible and where
+    /// they are docked (including floating windows). Written when
+    /// the app exits; never fatal.
+    pub fn save_layout(&self) {
+        let Some(path) = self.layout_path() else {
+            return;
+        };
+        let mut json = match serde_json::to_value(&self.ui.dock) {
+            Ok(json) => json,
+            Err(e) => {
+                log::warn!("cannot serialize the dock layout: {e}");
+                return;
+            }
+        };
+        sanitize_layout(&mut json);
+        if let Err(e) = std::fs::write(&path, json.to_string()) {
+            log::warn!("cannot write the dock layout: {e}");
+        }
+    }
+
+    /// Restore the dock layout saved by [`App::save_layout`]. A
+    /// missing, corrupt or screen-less layout falls back to the
+    /// default (the lone screen) — never fatal.
+    pub fn restore_layout(&mut self) {
+        let Some(path) = self.layout_path() else {
+            return;
+        };
+        let restored = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .map(|mut json| {
+                sanitize_layout(&mut json);
+                serde_json::from_value::<egui_dock::DockState<crate::ui::dock::Tab>>(json)
+            })
+            .and_then(|parsed| parsed.ok());
+        match restored {
+            Some(dock) if dock.find_tab(&crate::ui::dock::Tab::Screen).is_some() => {
+                self.ui.dock = dock;
+            }
+            _ => log::info!("dock layout not restored; using the default"),
         }
     }
 

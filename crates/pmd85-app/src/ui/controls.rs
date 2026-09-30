@@ -2,6 +2,7 @@
 //! machine summary, settings toggle.
 
 use crate::app::App;
+use crate::ui::dock;
 use crate::ui::theme::Theme;
 use egui_phosphor::fill as icon;
 
@@ -151,25 +152,25 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Settings gear.
+                    // Settings gear (a floating window, not a tab).
                     let gear = egui::Button::new(egui::RichText::new(icon::GEAR).size(14.0))
                         .selected(app.ui.settings_open);
                     if ui.add(gear).on_hover_text("Settings").clicked() {
                         app.ui.settings_open = !app.ui.settings_open;
                     }
-                    // Keyboard layout reference.
+                    // Keyboard layout reference (dock tab).
                     let kbd = egui::Button::new(egui::RichText::new(icon::KEYBOARD).size(14.0))
-                        .selected(app.ui.keyboard_open);
+                        .selected(dock::tab_visible(&app.ui.dock, dock::Tab::Keyboard));
                     if ui.add(kbd).on_hover_text("Keyboard layout").clicked() {
-                        app.ui.keyboard_open = !app.ui.keyboard_open;
+                        dock::toggle_tab(&mut app.ui.dock, dock::Tab::Keyboard);
                     }
-                    // Cassette tape editor.
+                    // Cassette tape editor (dock tab).
                     let tape = egui::Button::new(
                         egui::RichText::new(icon::CASSETTE_TAPE).size(14.0),
                     )
-                    .selected(app.ui.tape_open);
+                    .selected(dock::tab_visible(&app.ui.dock, dock::Tab::Tape));
                     if ui.add(tape).on_hover_text("Cassette tape").clicked() {
-                        app.ui.tape_open = !app.ui.tape_open;
+                        dock::toggle_tab(&mut app.ui.dock, dock::Tab::Tape);
                     }
                     // Machine summary on the right.
                     let module = app.config.rom_module.as_deref().unwrap_or("no module");
