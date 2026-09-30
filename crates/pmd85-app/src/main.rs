@@ -158,6 +158,12 @@ impl ApplicationHandler for Application {
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(self.app.next_wake(now)));
     }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Remember the session (the tape) before the process goes
+        // away; settings are already written on every change.
+        self.app.save_session();
+    }
 }
 
 impl Application {
@@ -230,7 +236,10 @@ fn main() {
         .unwrap_or_default();
 
     let ctx = Context::default();
-    let app = App::new(ctx, &args, settings);
+    let mut app = App::new(ctx, &args, settings);
+    // The session (the tape that was loaded when the app last
+    // exited) comes back; a missing snapshot is a clean start.
+    app.restore_session();
 
     let event_loop = EventLoop::new().expect("cannot create event loop");
     let mut application = Application {

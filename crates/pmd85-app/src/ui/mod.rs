@@ -931,8 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn load_state_reports_corrupt_files_and_repaints() {
-        let mut app = test_app();
+    fn load_state_reports_corrupt_files_and_repaints() {        let mut app = test_app();
         let dir = state_scratch_dir("corrupt");
         let bad = dir.join("bad.pss");
         std::fs::write(&bad, b"definitely not a save state").unwrap();
@@ -956,6 +955,100 @@ mod tests {
             !app.decode_buf.is_empty(),
             "the screen was not decoded on load"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ----- session (remembered across restarts) ------------------------
+
+    #[test]
+    fn machine_config_changes_persist() {
+        let mut app = test_app();
+        let dir = state_scratch_dir("config");
+        app.set_settings_dir(dir.clone());
+
+        // Switch to a 85-2 with the default monitor: the choice must
+        // become the boot configuration for the next start.
+        let cfg = crate::app::MachineConfig {
+            model: pmd85_core::Model::Pmd852,
+            monitor: None,
+            rom_module: None,
+        };
+        app.apply_config(cfg);
+        assert_eq!(app.machine.model(), pmd85_core::Model::Pmd852);
+
+        let loaded = crate::config::AppSettings::load(&dir);
+        assert_eq!(
+            pmd85_core::Model::from_str_loose(&loaded.model),
+            Some(pmd85_core::Model::Pmd852)
+        );
+        assert_eq!(loaded.monitor, None);
+
+        // A fresh app built from those settings boots the 85-2.
+        let app2 = app_with_settings(loaded);
+        assert_eq!(app2.config.model, pmd85_core::Model::Pmd852);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_round_trips_the_tape() {
+        let mut app = test_app();
+        let dir = state_scratch_dir("session");
+        app.set_settings_dir(dir.clone());
+
+        // A tape with unsaved edits, a path and a selection.
+        let tape_path = dir.join("mygame.ptp");
+        app.tape.tape.blocks.push(
+            tape::make_file(0, b'?', "GAME", 0x1000, &[1, 2, 3, 4]).unwrap(),
+        );
+        app.tape.tape.blocks[0].body_bytes[1] ^= 0xFF; // an unsaved edit
+        app.tape.path = Some(tape_path.clone());
+        app.tape.dirty = true;
+        app.tape.selected = Some(0);
+        app.save_session();
+
+        let mut app2 = test_app();
+        app2.set_settings_dir(dir.clone());
+        app2.restore_session();
+        assert_eq!(app2.tape.tape.blocks.len(), 1);
+        assert_eq!(app2.tape.tape.blocks[0].body_bytes, app.tape.tape.blocks[0].body_bytes);
+        assert_eq!(app2.tape.path, Some(tape_path), "Save keeps writing there");
+        assert!(app2.tape.dirty, "the dirty dot survived");
+        assert_eq!(app2.tape.selected, Some(0));
+
+        // An untitled tape (no path) round-trips too.
+        app2.tape.clear();
+        app2.tape.tape.blocks.push(
+            tape::make_file(3, b'?', "SCRATCH", 0x2000, &[9]).unwrap(),
+        );
+        app2.tape.dirty = true;
+        app2.save_session();
+        let mut app3 = test_app();
+        app3.set_settings_dir(dir.clone());
+        app3.restore_session();
+        assert_eq!(app3.tape.path, None);
+        assert_eq!(app3.tape.files().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_or_missing_sessions_are_a_clean_start() {
+        let mut app = test_app();
+        let dir = state_scratch_dir("corrupt-session");
+        app.set_settings_dir(dir.clone());
+
+        // Nothing saved yet: clean, empty tape.
+        app.restore_session();
+        assert!(app.tape.tape.blocks.is_empty());
+        assert_eq!(app.tape.path, None);
+
+        // Garbage snapshot files must not panic or wedge the editor.
+        std::fs::create_dir_all(dir.join("session")).unwrap();
+        std::fs::write(dir.join("session/tape.ptp"), b"not a tape").unwrap();
+        std::fs::write(dir.join("session/session.json"), "{not json").unwrap();
+        app.restore_session();
+        assert!(app.tape.tape.blocks.is_empty(), "corrupt tape snapshot ignored");
+        assert_eq!(app.tape.path, None, "corrupt sidecar ignored");
+        assert!(!app.tape.dirty);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

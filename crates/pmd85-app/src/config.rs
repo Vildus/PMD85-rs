@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize};
 pub struct AppSettings {
     /// Model to boot (`Model::from_str_loose` form, e.g. `"85-3"`).
     pub model: String,
+    /// Monitor ROM file name to boot with (`None` = the model's
+    /// default from the ROM directory).
+    pub monitor: Option<String>,
     /// ROM module file name to attach at boot (in the ROM directory).
     pub rom_module: Option<String>,
     /// Speaker muted.
@@ -38,6 +41,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         AppSettings {
             model: Model::Pmd853.name().to_string(),
+            monitor: None,
             rom_module: None,
             mute: false,
             theme: crate::ui::theme::DEFAULT_THEME.to_string(),
@@ -60,6 +64,49 @@ pub fn config_dir() -> Option<PathBuf> {
 /// Subdirectory holding custom theme files.
 pub fn themes_dir() -> Option<PathBuf> {
     config_dir().map(|d| d.join("themes"))
+}
+
+/// The part of the session that is not the tape image itself:
+/// what the tape editor looked like when the app exited.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionState {
+    /// File the tape was last saved to (`None` = untitled).
+    pub tape_path: Option<PathBuf>,
+    /// Unsaved edits since the last load/save.
+    pub tape_dirty: bool,
+    /// Selected file in the tape editor.
+    pub selected: Option<usize>,
+}
+
+impl SessionState {
+    /// Load from `session.json` in `dir`, falling back to defaults
+    /// (and logging) on a missing or corrupt file.
+    pub fn load(dir: &Path) -> Self {
+        let path = dir.join("session.json");
+        match fs::read_to_string(&path) {
+            Ok(text) => match serde_json::from_str::<SessionState>(&text) {
+                Ok(state) => return state,
+                Err(e) => log::warn!("cannot parse {}: {e}", path.display()),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => log::warn!("cannot read {}: {e}", path.display()),
+        }
+        SessionState::default()
+    }
+
+    /// Write to `session.json` in `dir`. Failures are logged, not fatal.
+    pub fn save(&self, dir: &Path) {
+        let path = dir.join("session.json");
+        match serde_json::to_string_pretty(self) {
+            Ok(text) => {
+                if let Err(e) = fs::create_dir_all(dir).and_then(|()| fs::write(&path, text)) {
+                    log::warn!("cannot write {}: {e}", path.display());
+                }
+            }
+            Err(e) => log::warn!("cannot serialize the session: {e}"),
+        }
+    }
 }
 
 impl AppSettings {
@@ -119,6 +166,7 @@ mod tests {
         let dir = test_dir("roundtrip");
         let s = AppSettings {
             model: "85-2A".into(),
+            monitor: Some("monit2A.rom".into()),
             rom_module: Some("basic2A.rmm".into()),
             mute: true,
             theme: "Amber Terminal".into(),
@@ -155,6 +203,7 @@ mod tests {
         assert!(s.mute);
         assert_eq!(Model::from_str_loose(&s.model), Some(Model::Pmd853));
         assert_eq!(s.speed, 1.0);
+        assert_eq!(s.monitor, None, "monitor defaults to the model's own");
         // New settings keep their defaults when absent from the file.
         assert!(s.tape_monitor);
         assert!(s.tape_autostop);

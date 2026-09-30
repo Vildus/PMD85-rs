@@ -410,9 +410,10 @@ impl App {
             })
             .unwrap_or_default();
         let rom_module = args.rom_module.clone().or_else(|| settings.rom_module.clone());
+        let monitor = args.monitor.clone().or_else(|| settings.monitor.clone());
         let config = MachineConfig {
             model,
-            monitor: args.monitor.clone(),
+            monitor,
             rom_module,
         };
 
@@ -538,6 +539,12 @@ impl App {
         if config.differs_from(&self.config) {
             self.rebuild_machine(&config);
             self.running = true;
+            // The chosen machine becomes the boot configuration for
+            // the next start (CLI arguments still override it for the
+            // run they were given on).
+            self.settings.model = config.model.name().to_string();
+            self.settings.monitor = config.monitor.clone();
+            self.settings.rom_module = config.rom_module.clone();
             self.persist();
         }
     }
@@ -710,6 +717,61 @@ impl App {
         match self.load_state_from(&path) {
             Ok(()) => self.notify("State restored (quick slot)"),
             Err(e) => self.notify(e),
+        }
+    }
+
+    // ----- session (remembered across restarts) -----------------------
+
+    /// Where the session snapshot lives: `session/` next to the
+    /// persisted settings.
+    fn session_dir(&self) -> Option<PathBuf> {
+        self.settings_dir.as_ref().map(|dir| dir.join("session"))
+    }
+
+    /// Remember the current session: the tape editor's contents
+    /// (unsaved edits included), its file path, dirty flag and
+    /// selection. Written when the app exits; never fatal.
+    pub fn save_session(&self) {
+        let Some(dir) = self.session_dir() else {
+            return;
+        };
+        if let Err(e) = std::fs::create_dir_all(&dir)
+            .and_then(|()| pmd85_core::tape::save(&dir.join("tape.ptp"), &self.tape.tape))
+        {
+            log::warn!("cannot write the session tape: {e}");
+            return;
+        }
+        crate::config::SessionState {
+            tape_path: self.tape.path.clone(),
+            tape_dirty: self.tape.dirty,
+            selected: self.tape.selected,
+        }
+        .save(&dir);
+    }
+
+    /// Restore the session remembered by [`App::save_session`]: the
+    /// tape comes back exactly as it was, unsaved edits included. A
+    /// missing or corrupt snapshot is a clean start (logged, never
+    /// fatal); a snapshot that parses with warnings reports them like
+    /// opening a tape would.
+    pub fn restore_session(&mut self) {
+        let Some(dir) = self.session_dir() else {
+            return;
+        };
+        let session = crate::config::SessionState::load(&dir);
+        match pmd85_core::tape::load(&dir.join("tape.ptp")) {
+            Ok(tape) => {
+                let warnings = tape.warnings.join("; ");
+                self.tape.tape = tape;
+                self.tape.path = session.tape_path;
+                self.tape.dirty = session.tape_dirty;
+                self.tape.selected = session.selected;
+                if !warnings.is_empty() {
+                    self.notify(format!("Tape: {warnings}"));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => log::warn!("cannot read the session tape: {e}"),
         }
     }
 
