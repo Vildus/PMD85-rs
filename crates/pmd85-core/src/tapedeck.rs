@@ -28,6 +28,22 @@
 //! never gated, making saves effectively instant). Playback above
 //! ~8× relies on the monitor's adaptive clock recovery staying within
 //! its polling granularity; MAX is best-effort.
+//!
+//! # Flash loading
+//!
+//! Body blocks can be *flash* blocks: instead of modulating the
+//! signal, the data is served straight to the ROM's read loops, which
+//! `machine.rs` intercepts at their entry points (a port of GPMD85's
+//! flash load). While a flash block is being served the DSR carries a
+//! continuous leader-tone carrier, so the ROM's edge-sensitive
+//! readers keep waiting exactly as they would behind a real leader.
+//! Header blocks always play for real (the ROM's leader
+//! synchronization genuinely runs), with a shortened leader in flash
+//! sessions. If nothing consumes a flash block for about a second —
+//! a custom reader we cannot intercept — the deck falls back to
+//! playing the remaining bytes for real.
+
+use std::collections::VecDeque;
 
 use crate::audio::SpeakerEdge;
 use crate::chips::usart8251::I8251;
@@ -51,6 +67,16 @@ const TC_DATA: i64 = 16;
 const TC_STOP: i64 = 4;
 const TC_EB_GAP: i64 = 480; // 0.2 s between extended-body bytes
 const TC_EB_MAX: i64 = 4800; // 2.0 s to finalize a save
+/// Flash session: header leaders are shortened (GPMD85 keeps the full
+/// 2.8 s; half a second of carrier is still ample for the ROM's EEBE
+/// leader calibration).
+const TC_FLASH_HEAD_LEADER: i64 = 1200; // 0.5 s
+/// Flash session: gap before a later file's header.
+const TC_FLASH_GAP: i64 = 240; // 0.1 s
+/// How long a flash body block waits for the machine to consume a
+/// byte or block before falling back to real-time playback of the
+/// remaining bytes (a custom reader on the other side).
+const TC_FLASH_NO_BYTE: i64 = 2400; // 1.0 s
 /// Half-clocks per serialized byte (2 start + 16 data + 4 stop).
 const HALF_CLOCKS_PER_BYTE: f64 = 22.0;
 
@@ -63,6 +89,10 @@ enum RxState {
     Data,
     Stop,
     Tail,
+    /// Flash block: not modulated; the data is served to the ROM's
+    /// read loops through the machine's intercepts while the DSR
+    /// carries a leader-tone carrier.
+    FlashData,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +109,21 @@ enum TxState {
     WaitEb,
     /// Collecting an extra headerless block.
     ExtBody,
+}
+
+/// One block in a playback session queue.
+#[derive(Clone, Debug)]
+pub struct PlayItem {
+    /// The block payload: header bytes (leader included) for `head`
+    /// blocks, body bytes otherwise.
+    pub data: Vec<u8>,
+    /// Whether this is a file header block.
+    pub head: bool,
+    /// Flash-session block: body blocks are served through the
+    /// machine's flash-load intercepts instead of the modulated
+    /// signal; header blocks play for real with a shortened leader.
+    /// All items of a session share this flag.
+    pub flash: bool,
 }
 
 /// The cassette deck attached to the 8251.
@@ -106,8 +151,13 @@ pub struct TapeDeck {
     /// Whether `data` is a file header block (followed by a body
     /// without a tail; see the module docs).
     head: bool,
-    /// The current block finished; the host advances to the next one.
-    finished: bool,
+    /// Blocks still to be fed after the current one. Advancing is
+    /// synchronous: the next block starts in the same half-clock (or
+    /// the same intercepted read) that finishes the previous one, so
+    /// the ROM never sees a hole between blocks.
+    queue: VecDeque<PlayItem>,
+    /// The session plays with shortened flash leaders.
+    session_flash: bool,
 
     // ----- recording -----
     tx_state: TxState,
@@ -156,7 +206,8 @@ impl TapeDeck {
             byte: 0,
             bit: true,
             head: false,
-            finished: false,
+            queue: VecDeque::new(),
+            session_flash: false,
             tx_state: TxState::Ff,
             tx_counter: 2,
             tx_body_end: 0,
@@ -188,43 +239,72 @@ impl TapeDeck {
         self.rx_state = RxState::Idle;
         self.data.clear();
         self.pos = 0;
-        self.finished = false;
+        self.queue.clear();
+        self.session_flash = false;
         self.set_quiet(uart);
     }
 
-    /// Start feeding a block to the machine.
-    ///
-    /// - `head = true`: the block is a file header block; `on_play`
-    ///   selects the fresh-play leader (2.8 s) versus the
-    ///   continuing-from-previous-block sequence (1.5 s gap + 2.8 s
-    ///   leader).
-    /// - `head = false`: a body or continuation block, introduced by
-    ///   the 0.5 s leader.
-    ///
-    /// An empty block finishes immediately instead of stalling.
-    pub fn play_block(&mut self, data: &[u8], head: bool, on_play: bool) {
-        self.finished = false;
-        if data.is_empty() {
+    /// Start a playback session: the blocks are fed one after another,
+    /// each starting the moment the previous one finishes (flash
+    /// blocks: the moment its data is consumed). The first block
+    /// plays with fresh-play leaders; later headers get the
+    /// continuing-from-previous-block gap.
+    pub fn play_session(&mut self, items: Vec<PlayItem>) {
+        self.queue = items.into();
+        self.session_flash = self.queue.front().is_some_and(|i| i.flash);
+        if let Some(first) = self.queue.pop_front() {
+            self.start_block(first, true);
+        } else {
             self.rx_state = RxState::Idle;
-            self.data.clear();
-            self.finished = true;
+        }
+    }
+
+    /// Start one queued block. An empty block finishes immediately
+    /// (the next one starts in its place).
+    fn start_block(&mut self, item: PlayItem, fresh: bool) {
+        if item.data.is_empty() {
+            self.next_block();
             return;
         }
-        self.data = data.to_vec();
+        self.data = item.data;
         self.pos = 0;
-        self.head = head;
+        self.head = item.head;
         self.bit = true;
-        if head {
-            if on_play {
+        if item.head {
+            if fresh {
                 self.rx_state = RxState::Leader;
-                self.rx_tick = TC_HEAD_LEADER;
+                self.rx_tick = if item.flash {
+                    TC_FLASH_HEAD_LEADER
+                } else {
+                    TC_HEAD_LEADER
+                };
             } else {
                 self.rx_state = RxState::Gap;
-                self.rx_tick = TC_GAP_SIZE;
+                self.rx_tick = if item.flash {
+                    TC_FLASH_GAP
+                } else {
+                    TC_GAP_SIZE
+                };
             }
+        } else if item.flash {
+            self.rx_state = RxState::FlashData;
+            self.rx_tick = TC_FLASH_NO_BYTE;
         } else {
             self.rx_state = RxState::Leader;
             self.rx_tick = TC_BODY_LEADER;
+        }
+    }
+
+    /// Finish the current block and start the next queued one; with an
+    /// empty queue the deck falls silent.
+    fn next_block(&mut self) {
+        match self.queue.pop_front() {
+            Some(item) => self.start_block(item, false),
+            None => {
+                self.rx_state = RxState::Idle;
+                self.data.clear();
+                self.pos = 0;
+            }
         }
     }
 
@@ -233,10 +313,53 @@ impl TapeDeck {
         self.rx_state != RxState::Idle
     }
 
-    /// Whether the current block just finished (the host advances to
-    /// the next block then). Drained by reading.
-    pub fn take_block_finished(&mut self) -> bool {
-        std::mem::take(&mut self.finished)
+    /// Whether the current block is being served through the
+    /// flash-load intercepts (see the module docs).
+    pub fn flash_armed(&self) -> bool {
+        self.rx_state == RxState::FlashData
+    }
+
+    /// Remaining unconsumed bytes of the flash block.
+    pub fn flash_len(&self) -> Option<usize> {
+        self.flash_armed().then(|| self.data.len() - self.pos)
+    }
+
+    /// The `i`-th remaining byte of the flash block; the caller is
+    /// expected to bound `i` with [`TapeDeck::flash_len`].
+    pub fn flash_at(&self, i: usize) -> Option<u8> {
+        (self.flash_armed() && self.pos + i < self.data.len()).then_some(self.data[self.pos + i])
+    }
+
+    /// Serve one byte to the intercepted byte reader. `None` when no
+    /// flash data is left (the reader's timeout path).
+    pub fn flash_byte(&mut self) -> Option<u8> {
+        if !self.flash_armed() || self.pos >= self.data.len() {
+            return None;
+        }
+        let b = self.data[self.pos];
+        self.pos += 1;
+        self.flash_consumed();
+        Some(b)
+    }
+
+    /// Consume `len` bytes, as the intercepted block reader just did.
+    pub fn flash_accept(&mut self, len: usize) {
+        if !self.flash_armed() {
+            return;
+        }
+        self.pos = (self.pos + len).min(self.data.len());
+        self.flash_consumed();
+    }
+
+    /// Bookkeeping after flash data was consumed: the block ends (and
+    /// the next one starts) when everything was taken, otherwise the
+    /// fallback timeout is pushed back.
+    fn flash_consumed(&mut self) {
+        if self.pos >= self.data.len() {
+            self.next_block();
+        } else {
+            self.rx_tick = TC_FLASH_NO_BYTE;
+        }
     }
 
     /// Playback progress through the current block: bytes fed so far
@@ -358,7 +481,11 @@ impl TapeDeck {
                 self.rx_tick -= 1;
                 if self.rx_tick == 0 {
                     self.rx_state = RxState::Leader;
-                    self.rx_tick = TC_HEAD_LEADER;
+                    self.rx_tick = if self.session_flash {
+                        TC_FLASH_HEAD_LEADER
+                    } else {
+                        TC_HEAD_LEADER
+                    };
                     self.set_quiet(uart);
                 }
             }
@@ -397,9 +524,8 @@ impl TapeDeck {
                     if self.pos == self.data.len() {
                         if self.head {
                             // A header block runs straight into its
-                            // body; the host starts it right away.
-                            self.rx_state = RxState::Idle;
-                            self.finished = true;
+                            // body; the next block starts right away.
+                            self.next_block();
                         } else {
                             self.rx_state = RxState::Tail;
                             self.rx_tick = TC_STOP_TAIL;
@@ -415,8 +541,19 @@ impl TapeDeck {
             RxState::Tail => {
                 self.rx_tick -= 1;
                 if self.rx_tick == 0 {
-                    self.rx_state = RxState::Idle;
-                    self.finished = true;
+                    self.next_block();
+                }
+            }
+            RxState::FlashData => {
+                // Nothing consumed for a while: the reader on the
+                // other side is not one we can intercept (a custom
+                // bit-banged reader). Fall back to playing the
+                // remaining bytes for real.
+                self.rx_tick -= 1;
+                if self.rx_tick == 0 {
+                    self.rx_state = RxState::Start;
+                    self.rx_tick = TC_START;
+                    self.bit = false;
                 }
             }
         }
@@ -550,6 +687,15 @@ mod tests {
         (TapeDeck::new(), I8251::new())
     }
 
+    /// A one-block non-flash playback session over `data`.
+    fn one_block(data: &[u8]) -> Vec<PlayItem> {
+        vec![PlayItem {
+            data: data.to_vec(),
+            head: false,
+            flash: false,
+        }]
+    }
+
     /// Feed `bytes` to the recorder as if the CPU wrote them.
     fn send(deck: &mut TapeDeck, uart: &mut I8251, bytes: &[u8]) {
         for &b in bytes {
@@ -599,7 +745,6 @@ mod tests {
         assert_eq!(u.read(1) & 0x80, 0x80, "DSR idles high");
         assert!(d.take_monitor_edges().is_empty());
         assert!(d.take_recorded().is_empty());
-        assert!(!d.take_block_finished());
     }
 
     #[test]
@@ -669,7 +814,7 @@ mod tests {
     #[test]
     fn tx_bytes_while_playing_reset_the_matcher() {
         let (mut d, mut u) = deck();
-        d.play_block(&[0x00; 4], false, true);
+        d.play_session(one_block(&[0x00; 4]));
         send(&mut d, &mut u, &leader());
         assert!(!d.is_recording(), "recorder disabled during playback");
         d.stop(&mut u);
@@ -718,8 +863,8 @@ mod tests {
         let (mut d, mut u) = deck();
         let (mut e, mut v) = deck();
         e.set_speed(2.0);
-        d.play_block(&[0x00; 4], false, true);
-        e.play_block(&[0x00; 4], false, true);
+        d.play_session(one_block(&[0x00; 4]));
+        e.play_session(one_block(&[0x00; 4]));
         // The same number of cycles advances the 2x deck twice as far
         // into the leader; it finishes its whole block with half the
         // cycles the 1x deck needs.

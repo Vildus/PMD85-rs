@@ -167,7 +167,10 @@ fn toolbar(ui: &mut egui::Ui, app: &mut App, _theme: &Theme) {
                 play_enabled,
                 egui::Button::new(play_label).selected(playing),
             )
-            .on_hover_text("Feed the selected file to the machine (load it with MGLD nn)")
+            .on_hover_text(
+                "Feed the selected file to the machine (type MGLD nn on \
+                 the PMD, where nn is the file's # number)",
+            )
             .clicked()
         {
             if playing {
@@ -216,7 +219,7 @@ fn toolbar(ui: &mut egui::Ui, app: &mut App, _theme: &Theme) {
 
         ui.separator();
 
-        // ---- auto-stop ----
+        // ---- auto-stop / flash load / data tone ----
         let mut auto_stop = app.tape.auto_stop;
         if ui
             .checkbox(&mut auto_stop, "Stop after file")
@@ -227,6 +230,31 @@ fn toolbar(ui: &mut egui::Ui, app: &mut App, _theme: &Theme) {
             .changed()
         {
             app.set_tape_autostop(auto_stop);
+        }
+        let mut flash = app.tape.flash;
+        if ui
+            .checkbox(&mut flash, "Flash load")
+            .on_hover_text(
+                "Fast-load played files: the monitor's tape read loops \
+                 are intercepted and fed the block data directly, so \
+                 MGLD finishes in a fraction of the time. Checksums, \
+                 filters and autorun still run for real, and \
+                 multi-block games fast-load too.",
+            )
+            .changed()
+        {
+            app.set_tape_flash(flash);
+        }
+        let mut tone = app.settings.tape_monitor;
+        if ui
+            .checkbox(&mut tone, "Data tone")
+            .on_hover_text(
+                "Play the tape data signal through the speaker while \
+                 loading or saving (the cassette sound)",
+            )
+            .changed()
+        {
+            app.set_tape_monitor(tone);
         }
     });
 }
@@ -323,7 +351,7 @@ fn file_list(ui: &mut egui::Ui, app: &mut App, theme: &Theme) {
         .auto_shrink([false, false])
         .show(ui, |ui| {
             egui::Grid::new("tape-files")
-                .num_columns(7)
+                .num_columns(8)
                 .spacing(egui::vec2(12.0, 3.0))
                 .striped(true)
                 .show(ui, |ui| {
@@ -333,7 +361,7 @@ fn file_list(ui: &mut egui::Ui, app: &mut App, theme: &Theme) {
                             .strong()
                             .color(c(&theme.accent))
                     };
-                    for title in ["#", "time", "name", "type", "start", "length", "crc"] {
+                    for title in ["#", "pos", "time", "name", "type", "start", "length", "crc"] {
                         ui.label(head(title));
                     }
                     ui.end_row();
@@ -344,12 +372,30 @@ fn file_list(ui: &mut egui::Ui, app: &mut App, theme: &Theme) {
                         let block = &blocks[file.block];
 
                         // ---- file row ----
+                        // The number is the two-digit ID typed into
+                        // MGLD/MGSV.
+                        let number = block
+                            .header
+                            .as_ref()
+                            .map(|h| format!("{:02X}", h.number))
+                            .unwrap_or_else(|| "\u{2014}".into());
+                        ui.label(
+                            egui::RichText::new(number).size(12.0).monospace(),
+                        )
+                        .on_hover_text(format!(
+                            "file {file_no}, block {} \u{2014} load with MGLD {}",
+                            file.block,
+                            block
+                                .header
+                                .as_ref()
+                                .map(|h| format!("{:02X}", h.number))
+                                .unwrap_or_else(|| "?".into())
+                        ));
                         ui.label(
                             egui::RichText::new(format!("@{}", offsets[file.block]))
                                 .size(11.0)
                                 .monospace(),
-                        )
-                        .on_hover_text(format!("file {file_no}, block {}", file.block));
+                        );
                         ui.label(
                             egui::RichText::new(tape_time(times[file.block]))
                                 .size(11.0)
@@ -406,7 +452,13 @@ fn file_list(ui: &mut egui::Ui, app: &mut App, theme: &Theme) {
                         for (n, &part) in file.continuations.iter().enumerate() {
                             let cont = &blocks[part];
                             ui.label(
-                                egui::RichText::new(format!("+{n} @{}", offsets[part]))
+                                egui::RichText::new(format!("+{n}"))
+                                    .size(11.0)
+                                    .monospace()
+                                    .weak(),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!("@{}", offsets[part]))
                                     .size(11.0)
                                     .monospace()
                                     .weak(),
@@ -426,7 +478,7 @@ fn file_list(ui: &mut egui::Ui, app: &mut App, theme: &Theme) {
                                 .monospace()
                                 .weak(),
                             );
-                            for _ in 0..4 {
+                            for _ in 0..5 {
                                 ui.label(egui::RichText::new("").monospace());
                             }
                             ui.end_row();

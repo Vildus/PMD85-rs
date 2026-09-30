@@ -10,10 +10,10 @@ use crate::bus::Memory;
 use crate::chips::ppi8255::{I8255, Port};
 use crate::chips::pit8253::I8253;
 use crate::chips::usart8251::I8251;
-use crate::cpu::{Bus, Cpu};
+use crate::cpu::{Bus, Cpu, Flags};
 use crate::keyboard::Keyboard;
 use crate::model::Model;
-use crate::tapedeck::TapeDeck;
+use crate::tapedeck::{PlayItem, TapeDeck};
 
 /// CPU clock: Tesla MHB8080A at 2.048 MHz.
 pub const CPU_CLOCK_HZ: u64 = 2_048_000;
@@ -151,9 +151,10 @@ impl MachineBus {
         self.tape.stop(&mut self.uart);
     }
 
-    /// Start feeding a tape block (convenience for the frontend).
-    pub fn tape_play(&mut self, data: &[u8], head: bool, on_play: bool) {
-        self.tape.play_block(data, head, on_play);
+    /// Start a tape playback session (convenience for the frontend):
+    /// the blocks are queued in the deck and fed one after another.
+    pub fn tape_play_session(&mut self, items: Vec<PlayItem>) {
+        self.tape.play_session(items);
     }
 
     /// Emulated CPU cycles executed since power-on.
@@ -352,6 +353,7 @@ impl Machine {
     pub fn run_cycles(&mut self, cycles: u64) {
         let target = self.bus.total_cycles() + cycles;
         while self.bus.total_cycles() < target {
+            self.tape_flash_intercept();
             let c = self.cpu.step(&mut self.bus) as u64;
             self.bus.advance_time(c);
         }
@@ -360,9 +362,103 @@ impl Machine {
     /// Execute exactly one CPU instruction (or interrupt), advancing
     /// peripheral clocks. Returns the cycles consumed.
     pub fn step_once(&mut self) -> u32 {
+        self.tape_flash_intercept();
         let c = self.cpu.step(&mut self.bus) as u64;
         self.bus.advance_time(c);
         c as u32
+    }
+
+    /// Flash-load interception of the monitor ROM's tape read loops,
+    /// a port of GPMD85's flash loading. While the deck serves a
+    /// flash block, the entry points of the block reader (`EDC4`,
+    /// or its compatibility-mode copy at `8DC4`) and of the byte
+    /// reader (`EB6C` / `8B6C`) never execute: they take their data
+    /// straight from the deck instead of demodulating the tape
+    /// signal. Everything around them — header filters, checksums,
+    /// the return into the caller, autorun stack overwrites — runs
+    /// for real, so a multi-block game fast-loads exactly as it would
+    /// from a real tape, just without the transfer time.
+    ///
+    /// The entry signatures (bytes at fixed offsets around the entry
+    /// point) are verified through the bus first, so both the native
+    /// ROM and the monitor-3 copy at `0x8000` (compatibility mode)
+    /// are covered, and coincidental callers elsewhere in RAM are
+    /// left alone.
+    fn tape_flash_intercept(&mut self) {
+        if !self.bus.tape.flash_armed() {
+            return;
+        }
+        match self.cpu.pc {
+            0xEDC4 | 0x8DC4 => self.flash_block_read(),
+            0xEB6C | 0x8B6C => self.flash_byte_read(),
+            _ => {}
+        }
+    }
+
+    /// Replace the block-read loop entered at `EDC4`/`8DC4` (the
+    /// entry's 256-byte page carries the copy in use). Post-conditions
+    /// mirror the ROM's exit at `EDE1`: HL restored to the start
+    /// address, DE = 0xFFFF, B = the running checksum, C preserved,
+    /// A = 0 with Z set on a checksum match and CY set on a mismatch
+    /// (GPMD85 semantics; the ROM's callers test both).
+    fn flash_block_read(&mut self) {
+        let page = self.cpu.pc & 0xFF00;
+        // Signature: INX HL at page|0xD3, RET at page|0xE1.
+        if self.bus.read(page | 0xD3) != 0x23 || self.bus.read(page | 0xE1) != 0xC9 {
+            return;
+        }
+        let Some(len) = self.bus.tape.flash_len() else {
+            return;
+        };
+        let start = u16::from_le_bytes([self.cpu.l, self.cpu.h]);
+        let count = u16::from_le_bytes([self.cpu.e, self.cpu.d]) as usize + 1;
+        let check_only = self.cpu.c == 0;
+        // The block must still hold `count` data bytes plus the
+        // checksum byte.
+        if len < count + 1 {
+            return;
+        }
+        let mut crc = 0u8;
+        for i in 0..count {
+            let b = self.bus.tape.flash_at(i).unwrap_or(0);
+            if !check_only {
+                self.bus.write(start.wrapping_add(i as u16), b);
+            }
+            crc = crc.wrapping_add(b);
+        }
+        let checksum = self.bus.tape.flash_at(count).unwrap_or(0);
+        self.cpu.d = 0xFF;
+        self.cpu.e = 0xFF;
+        self.cpu.b = crc;
+        self.cpu.a = 0;
+        self.cpu.flags = Flags {
+            z: crc == checksum,
+            cy: crc != checksum,
+            ..Flags::default()
+        };
+        self.cpu.pc = page | 0xE1;
+        self.bus.tape.flash_accept(count + 1);
+    }
+
+    /// Replace the byte reader entered at `EB6C`/`8B6C`. One byte is
+    /// served with all flags clear; with no flash data left the
+    /// reader returns with carry set, its timeout path.
+    fn flash_byte_read(&mut self) {
+        let pc = self.cpu.pc;
+        let page = pc & 0xFF00;
+        // Signature: PUSH BC at the entry, RET at page|0x9B.
+        if self.bus.read(pc) != 0xC5 || self.bus.read(page | 0x9B) != 0xC9 {
+            return;
+        }
+        let byte = self.bus.tape.flash_byte();
+        self.cpu.flags = Flags {
+            cy: byte.is_none(),
+            ..Flags::default()
+        };
+        if let Some(b) = byte {
+            self.cpu.a = b;
+        }
+        self.cpu.pc = page | 0x9B;
     }
 }
 

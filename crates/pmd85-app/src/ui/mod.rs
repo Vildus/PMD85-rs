@@ -183,6 +183,23 @@ mod tests {
                 "tape-playing",
                 Box::new(|a| {
                     a.ui.tape_open = true;
+                    a.tape.flash = false;
+                    let block = pmd85_core::tape::make_file(
+                        0,
+                        b'?',
+                        "TESTFILE",
+                        0x1000,
+                        &[1u8, 2, 3, 4],
+                    )
+                    .unwrap();
+                    a.tape.tape.blocks.push(block);
+                    a.play_tape_file(0);
+                }),
+            ),
+            (
+                "tape-flash-loading",
+                Box::new(|a| {
+                    a.ui.tape_open = true;
                     let block = pmd85_core::tape::make_file(
                         0,
                         b'?',
@@ -571,6 +588,7 @@ mod tests {
     #[test]
     fn tape_play_file_loads_via_the_machine() {
         let mut app = test_app();
+        app.tape.flash = false; // exercise the real tape interface
         let mut content: Vec<u8> = (1..17u16).map(|i| i as u8).collect();
         content.insert(0, 0x76); // halt, so the loaded file stops cleanly
         app.tape
@@ -579,9 +597,7 @@ mod tests {
             .push(tape::make_file(0, b'?', "LOADTST", 0x1000, &content).unwrap());
 
         // Boot the monitor, then type MGLD 00.
-        for _ in 0..500 {
-            app.machine.step_frame();
-        }
+        app.run_frames(500);
         use Key::*;
         type_command(&mut app, &[M, G, L, D, Space, Digit0, Digit0, Enter]);
 
@@ -594,8 +610,7 @@ mod tests {
             if !app.tape.is_playing() {
                 break;
             }
-            app.machine.step_frame();
-            let _ = app.tape.pump(&mut app.machine);
+            app.run_frames(1);
         }
         assert!(!app.tape.is_playing(), "playback session did not end");
         assert!(!app.machine.bus.tape.is_playing());
@@ -604,9 +619,154 @@ mod tests {
         }
     }
 
+    /// Play the file with flash loading off but the emulation sped up:
+    /// the deck must be pumped per emulated frame (not per rendered
+    /// frame) or the load corrupts — this pins that contract.
+    #[test]
+    fn tape_play_file_survives_a_speedup() {
+        let mut app = test_app();
+        app.tape.flash = false;
+        let mut content: Vec<u8> = (1..33u16).map(|i| i as u8).collect();
+        content.insert(0, 0x76);
+        app.tape
+            .tape
+            .blocks
+            .push(tape::make_file(0, b'?', "FASTTST", 0x1000, &content).unwrap());
+        app.set_multiplier(10.0);
+
+        app.run_frames(500);
+        use Key::*;
+        type_command(&mut app, &[M, G, L, D, Space, Digit0, Digit0, Enter]);
+        app.play_tape_file(0);
+        for _ in 0..3000 {
+            if !app.tape.is_playing() {
+                break;
+            }
+            app.run_frames(1);
+        }
+        assert!(!app.tape.is_playing(), "playback session did not end");
+        for (i, &expect) in content.iter().enumerate() {
+            assert_eq!(app.machine.bus.memory.ram[0x1000 + i], expect, "+{i}");
+        }
+    }
+
+    #[test]
+    fn tape_flash_loads_the_file() {
+        let mut app = test_app();
+        let mut content: Vec<u8> = (1..17u16).map(|i| i as u8).collect();
+        content.insert(0, 0x76);
+        app.tape
+            .tape
+            .blocks
+            .push(tape::make_file(2, b'?', "FLASHTST", 0x1000, &content).unwrap());
+
+        // Boot the monitor and enter the MGLD 02 wait.
+        app.run_frames(500);
+        use Key::*;
+        type_command(&mut app, &[M, G, L, D, Space, Digit0, Digit2, Enter]);
+
+        // Flash: the header plays for real (shortened leader), the
+        // body is served through the intercepts — the whole load
+        // takes barely over a second of emulated time.
+        assert!(app.tape.flash, "flash load is the default");
+        assert!(app.tape.request_play(0, &mut app.machine));
+        assert!(app.machine.bus.tape.is_playing(), "deck is feeding");
+        let mut frames = 0;
+        while app.tape.is_playing() {
+            frames += 1;
+            assert!(frames < 300, "flash load did not finish");
+            app.run_frames(1);
+        }
+        assert!(
+            frames < 120,
+            "flash load took {frames} frames — not much faster than real"
+        );
+        assert_eq!(app.machine.bus.memory.ram[0x1000..0x1000 + content.len()], content[..]);
+
+        // A few frames later the machine is back at the monitor
+        // prompt, not stuck in the tape wait.
+        app.run_frames(60);
+        assert!(app.machine.cpu.pc >= 0xE000, "left the monitor ROM");
+        let mut wait_loop = 0;
+        for _ in 0..50 {
+            app.run_frames(1);
+            if (0xE890..0xE8B0).contains(&app.machine.cpu.pc) {
+                wait_loop += 1;
+            }
+        }
+        assert_eq!(wait_loop, 0, "still stuck in the tape wait loop");
+    }
+
+    /// The full multi-block game flow in one: MGLD flash-loads a loader
+    /// whose body covers the monitor stack (so the block read's RET
+    /// jumps to the vector the body placed there — autorun), and the
+    /// loader itself reads the continuation block through BLKLOAD.
+    #[test]
+    fn tape_flash_loads_multi_block_games_with_autorun() {
+        let mut app = test_app();
+        const HIJACK: usize = 0xBEFB; // the EDE2 return slot on the monitor-3 stack
+
+        // A loader program at 0x1000: mark that it ran, then read the
+        // continuation block (16 bytes) into 0x2000 through BLKLOAD
+        // (EDC4), then report success and halt.
+        let mut loader = vec![0u8; HIJACK + 2 - 0x1000];
+        loader[0..2].copy_from_slice(&[0x3E, 0xA5]); // MVI A,A5
+        loader[2..5].copy_from_slice(&[0x32, 0x00, 0x30]); // STA 3000
+        loader[5..8].copy_from_slice(&[0x21, 0x00, 0x20]); // LXI HL,2000
+        loader[8..11].copy_from_slice(&[0x11, 0x0F, 0x00]); // LXI DE,15
+        loader[11..13].copy_from_slice(&[0x0E, 0x01]); // MVI C,1
+        loader[13..16].copy_from_slice(&[0xCD, 0xC4, 0xED]); // CALL EDC4
+        loader[16..19].copy_from_slice(&[0xD2, 0x40, 0x10]); // JNC 1040
+        loader[19..21].copy_from_slice(&[0x3E, 0xEE]); // MVI A,EE (error)
+        loader[21..24].copy_from_slice(&[0x32, 0x01, 0x30]); // STA 3001
+        loader[24] = 0x76; // HLT
+        loader[0x40..0x43].copy_from_slice(&[0x32, 0x01, 0x30]); // STA 3001
+        loader[0x43] = 0x76; // HLT
+        // Autorun vector: the block read's RET at EDE1 pops this word.
+        loader[HIJACK - 0x1000] = 0x00;
+        loader[HIJACK - 0x1000 + 1] = 0x10;
+
+        let payload: Vec<u8> = (0..16u16).map(|i| 0x60 ^ i as u8).collect();
+        app.tape
+            .tape
+            .blocks
+            .push(tape::make_file(0, b'?', "AUTORUN", 0x1000, &loader).unwrap());
+        let mut body = payload.clone();
+        body.push(tape::crc8(&payload));
+        app.tape.tape.blocks.push(tape::TapeBlock {
+            header: None,
+            header_bytes: Vec::new(),
+            body_bytes: body,
+            header_crc_ok: true,
+            body_crc_ok: true,
+            body_length_error: None,
+            old_format: false,
+        });
+
+        app.run_frames(500);
+        use Key::*;
+        type_command(&mut app, &[M, G, L, D, Space, Digit0, Digit0, Enter]);
+        assert!(app.tape.request_play(0, &mut app.machine));
+        let mut frames = 0;
+        while app.tape.is_playing() {
+            frames += 1;
+            assert!(frames < 300, "flash load did not finish");
+            app.run_frames(1);
+        }
+        // The loader ran (via autorun), read the continuation block
+        // through BLKLOAD, and halted on the success path.
+        assert!(app.machine.cpu.halted, "the loader never halted");
+        assert_eq!(app.machine.bus.memory.ram[0x3000], 0xA5, "autorun did not run");
+        assert_eq!(app.machine.bus.memory.ram[0x3001], 0x00, "checksum mismatch");
+        for (i, &expect) in payload.iter().enumerate() {
+            assert_eq!(app.machine.bus.memory.ram[0x2000 + i], expect, "+{i}");
+        }
+    }
+
     #[test]
     fn machine_reset_clears_tape_playback() {
         let mut app = test_app();
+        app.tape.flash = false; // exercise the real tape interface
         app.tape
             .tape
             .blocks

@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use pmd85_core::machine::CPU_CLOCK_HZ;
 use pmd85_core::tape::{self, Tape};
+use pmd85_core::tapedeck::PlayItem;
 use pmd85_core::vram::{self, ColorProfile, HEIGHT, WIDTH};
 use pmd85_core::{Machine, Model};
 
@@ -83,22 +84,6 @@ impl TapeFile {
     }
 }
 
-/// Which half of a block a queue entry feeds.
-#[derive(Clone, Copy, Debug)]
-enum FeedPart {
-    Header,
-    Body,
-}
-
-/// One playback session: blocks (and block halves) still to feed,
-/// in order.
-#[derive(Debug)]
-struct PlaySession {
-    queue: VecDeque<(usize, FeedPart)>,
-    /// False until the first block has been fed.
-    started: bool,
-}
-
 /// Cassette tape editor and transport state: the tape image being
 /// edited, the selected file and the playback session feeding the
 /// machine. Also harvests blocks the machine records.
@@ -115,8 +100,14 @@ pub struct TapeState {
     /// Stop playback after the selected file's blocks (at the next
     /// file header); when off, the rest of the tape follows.
     pub auto_stop: bool,
-    /// Active playback session.
-    play: Option<PlaySession>,
+    /// Fast-load played files: body blocks are served straight to the
+    /// monitor's read loops instead of through the tape signal, so
+    /// MGLD (and multi-block loaders) finish in a fraction of the
+    /// time while checksums, filters and autorun still run for real.
+    pub flash: bool,
+    /// Active playback session (the block queue itself lives in the
+    /// machine's deck, which advances blocks synchronously).
+    play: bool,
     /// The recorder was active at the previous pump (edge detector
     /// for harvesting the recorded stream).
     was_recording: bool,
@@ -130,7 +121,8 @@ impl Default for TapeState {
             dirty: false,
             selected: None,
             auto_stop: true,
-            play: None,
+            flash: true,
+            play: false,
             was_recording: false,
         }
     }
@@ -159,7 +151,7 @@ impl TapeState {
     /// caller is responsible for stopping playback first.
     pub fn open(&mut self, path: &Path) -> Result<(), String> {
         let tape = tape::load(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        self.play = None;
+        self.play = false;
         self.tape = tape;
         self.path = Some(path.to_path_buf());
         self.dirty = false;
@@ -169,7 +161,7 @@ impl TapeState {
 
     /// Start a fresh empty tape. The caller stops playback first.
     pub fn clear(&mut self) {
-        self.play = None;
+        self.play = false;
         self.tape = Tape::default();
         self.path = None;
         self.dirty = false;
@@ -255,82 +247,78 @@ impl TapeState {
     }
 
     /// Request playback of `file`: its header, body and continuation
-    /// blocks; with `auto_stop` off the rest of the tape follows.
-    /// The first block is fed on the next [`TapeState::pump`].
-    pub fn request_play(&mut self, file: usize) {
+    /// blocks; with `auto_stop` off the rest of the tape follows. The
+    /// blocks are queued in the machine's deck, which feeds them one
+    /// after another. With `flash` set, body blocks are served through
+    /// the flash-load intercepts instead of the tape signal. Returns
+    /// whether playback started.
+    pub fn request_play(&mut self, file: usize, machine: &mut Machine) -> bool {
         let files = self.files();
         let Some(f) = files.get(file) else {
-            return;
+            return false;
         };
-        let mut queue: VecDeque<(usize, FeedPart)> = VecDeque::new();
-        let has_header = self.tape.blocks[f.block].header.is_some();
-        if has_header {
-            queue.push_back((f.block, FeedPart::Header));
+        self.selected = Some(file);
+        let flash = self.flash;
+        let mut rows: Vec<(usize, bool)> = Vec::new();
+        if self.tape.blocks[f.block].header.is_some() {
+            rows.push((f.block, true));
         }
-        queue.push_back((f.block, FeedPart::Body));
+        rows.push((f.block, false));
         for &c in &f.continuations {
-            queue.push_back((c, FeedPart::Body));
+            rows.push((c, false));
         }
         if !self.auto_stop {
             let (_, len) = f.span();
             for i in f.block + len..self.tape.blocks.len() {
                 if self.tape.blocks[i].header.is_some() {
-                    queue.push_back((i, FeedPart::Header));
+                    rows.push((i, true));
                 }
-                queue.push_back((i, FeedPart::Body));
+                rows.push((i, false));
             }
         }
-        if queue.is_empty() {
-            return;
+        if rows.is_empty() {
+            return false;
         }
-        self.play = Some(PlaySession {
-            queue,
-            started: false,
-        });
-        self.selected = Some(file);
+        let queue: Vec<PlayItem> = rows
+            .into_iter()
+            .map(|(idx, head)| {
+                let block = &self.tape.blocks[idx];
+                PlayItem {
+                    data: if head {
+                        block.header_bytes.clone()
+                    } else {
+                        block.body_bytes.clone()
+                    },
+                    head,
+                    flash,
+                }
+            })
+            .collect();
+        machine.bus.tape_play_session(queue);
+        self.play = true;
+        true
     }
 
     /// Stop playback (nothing more is fed to the machine).
     pub fn stop_playback(&mut self, machine: &mut Machine) {
-        self.play = None;
+        self.play = false;
         machine.bus.tape_stop();
     }
 
     /// Whether a playback session is active.
     pub fn is_playing(&self) -> bool {
-        self.play.is_some()
+        self.play
     }
 
     /// Feed the machine from the playback session and harvest
-    /// recorded blocks. Called once per rendered frame; returns a
-    /// user notification when something was recorded.
+    /// recorded blocks. Called once per emulated frame (and once per
+    /// rendered frame while paused); returns a user notification when
+    /// something was recorded.
     pub fn pump(&mut self, machine: &mut Machine) -> Option<String> {
-        // A fresh session feeds its first block immediately.
-        if let Some(session) = self.play.as_mut() {
-            if !session.started {
-                session.started = true;
-                if let Some((idx, part)) = session.queue.pop_front() {
-                    self.feed(machine, idx, part, true);
-                }
-            }
-        }
-
-        // A finished block advances to the next one; an empty block
-        // finishes immediately, hence the loop.
-        while machine.bus.tape.take_block_finished() {
-            let next = self.play.as_mut().and_then(|s| s.queue.pop_front());
-            match next {
-                Some((idx, part)) => self.feed(machine, idx, part, false),
-                None => {
-                    self.play = None;
-                    break;
-                }
-            }
-        }
-
-        // A session the machine reset out from under us.
-        if self.play.is_some() && !machine.bus.tape.is_playing() {
-            self.play = None;
+        // A session that played to the end, or that the machine
+        // reset out from under us.
+        if self.play && !machine.bus.tape.is_playing() {
+            self.play = false;
         }
 
         // Recording: harvest the stream once the recorder goes quiet.
@@ -351,17 +339,6 @@ impl TapeState {
         }
         self.was_recording = recording;
         notification
-    }
-
-    /// Feed one half of a tape block to the machine's deck.
-    fn feed(&self, machine: &mut Machine, idx: usize, part: FeedPart, on_play: bool) {
-        let block = &self.tape.blocks[idx];
-        match part {
-            FeedPart::Header => {
-                machine.bus.tape_play(&block.header_bytes, true, on_play)
-            }
-            FeedPart::Body => machine.bus.tape_play(&block.body_bytes, false, on_play),
-        }
     }
 }
 
@@ -462,6 +439,7 @@ impl App {
             frames_done: 0,
             tape: TapeState {
                 auto_stop: settings.tape_autostop,
+                flash: settings.tape_warp,
                 ..TapeState::default()
             },
             ui: UiState::default(),
@@ -627,10 +605,21 @@ impl App {
         self.tape.clear();
     }
 
-    /// Begin playing tape file `file` into the machine (the first
-    /// block is fed immediately).
+    /// Begin playing tape file `file` into the machine (the blocks are
+    /// queued in the deck immediately).
     pub fn play_tape_file(&mut self, file: usize) {
-        self.tape.request_play(file);
+        let flash = self.tape.flash;
+        if self.tape.request_play(file, &mut self.machine) && flash {
+            let name = self
+                .tape
+                .files()
+                .get(file)
+                .and_then(|f| self.tape.tape.blocks.get(f.block))
+                .and_then(|b| b.header.as_ref())
+                .map(|h| h.name_str())
+                .unwrap_or_else(|| "file".into());
+            self.notify(format!("Tape: flash-loading {name}"));
+        }
         let _ = self.tape.pump(&mut self.machine);
     }
 
@@ -652,7 +641,29 @@ impl App {
         self.persist();
     }
 
+    /// Toggle flash loading and persist it.
+    pub fn set_tape_flash(&mut self, on: bool) {
+        self.tape.flash = on;
+        self.settings.tape_warp = on;
+        self.persist();
+    }
+
     // ----- emulation -----
+
+    /// Run `frames` emulated frames, pumping the tape deck between
+    /// them. The pump must run per *emulated* frame, not per rendered
+    /// frame: at a speedup several emulated frames pass per render
+    /// frame, and the deck's block transitions (and the session
+    /// bookkeeping around them) must stay in lockstep with the
+    /// machine or loads corrupt.
+    pub(crate) fn run_frames(&mut self, frames: u64) {
+        for _ in 0..frames {
+            self.machine.step_frame();
+            if let Some(message) = self.tape.pump(&mut self.machine) {
+                self.notify(message);
+            }
+        }
+    }
 
     /// Run the emulation for this render frame, feed the speaker, and
     /// update the screen texture. Called once per render frame.
@@ -662,31 +673,25 @@ impl App {
                 let start = Instant::now();
                 let mut frames = 0u64;
                 while start.elapsed() < TURBO_BUDGET {
-                    self.machine.step_frame();
+                    self.run_frames(1);
                     frames += 1;
                 }
                 frames
             } else {
                 let frames = self.pacer.take_frames(self.speed.multiplier) as u64;
-                for _ in 0..frames {
-                    self.machine.step_frame();
-                }
+                self.run_frames(frames);
                 frames
             }
         } else {
             // While paused keep the pacing anchored so resuming does
             // not fast-forward through the pause.
             self.pacer.resync();
+            if let Some(message) = self.tape.pump(&mut self.machine) {
+                self.notify(message);
+            }
             0
         };
         self.frames_done += frames;
-
-        // Tape: advance playback into the machine and harvest
-        // recorded blocks (also while paused: the deck state machine
-        // only moves with the machine).
-        if let Some(message) = self.tape.pump(&mut self.machine) {
-            self.notify(message);
-        }
 
         // Speaker (and the tape data-tone monitor, when enabled):
         // only at exactly 1x real time; otherwise drain (the edge logs

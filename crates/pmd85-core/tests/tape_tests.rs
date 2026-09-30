@@ -6,6 +6,7 @@ use pmd85_core::keyboard::Key;
 use pmd85_core::machine::Machine;
 use pmd85_core::model::Model;
 use pmd85_core::tape::{make_file, Tape, TapeBlock};
+use pmd85_core::tapedeck::PlayItem;
 
 const ROM_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../Rom/");
 
@@ -43,18 +44,22 @@ fn type_command(machine: &mut Machine, keys: &[Key]) {
 /// machine until both blocks have been fed. Returns whether playback
 /// ran to the end within `frames`.
 fn play_file(machine: &mut Machine, block: &TapeBlock, frames: u64) -> bool {
-    machine
-        .bus
-        .tape_play(&block.header_bytes, true, true);
-    let mut body_started = false;
+    machine.bus.tape_play_session(vec![
+        PlayItem {
+            data: block.header_bytes.clone(),
+            head: true,
+            flash: false,
+        },
+        PlayItem {
+            data: block.body_bytes.clone(),
+            head: false,
+            flash: false,
+        },
+    ]);
     for _ in 0..frames {
         machine.step_frame();
-        if machine.bus.tape.take_block_finished() {
-            if body_started {
-                return true;
-            }
-            machine.bus.tape_play(&block.body_bytes, false, false);
-            body_started = true;
+        if !machine.bus.tape.is_playing() {
+            return true;
         }
     }
     false
@@ -109,12 +114,190 @@ fn mgld_loads_a_played_file() {
 fn machine_reset_stops_playback() {
     let mut machine = boot();
     let block = loadable_file();
-    machine.bus.tape_play(&block.header_bytes, true, true);
+    machine.bus.tape_play_session(vec![PlayItem {
+        data: block.header_bytes.clone(),
+        head: true,
+        flash: false,
+    }]);
     for _ in 0..30 {
         machine.step_frame();
     }
     assert!(machine.bus.tape.is_playing());
     machine.reset();
+    assert!(!machine.bus.tape.is_playing());
+}
+
+/// The block-read intercept contract: entering `EDC4` (BLKLOAD) while
+/// the deck serves a flash block skips the routine wholesale and
+/// leaves behind exactly what the real one would.
+#[test]
+fn flash_block_read_contract() {
+    let mut machine = boot();
+    let data = [1u8, 2, 3, 4, 5];
+    let checksum = data.iter().fold(0u8, |a, &b| a.wrapping_add(b));
+    machine.bus.tape_play_session(vec![PlayItem {
+        data: [data.as_slice(), &[checksum]].concat(),
+        head: false,
+        flash: true,
+    }]);
+
+    // A fake stack whose return address parks on a HLT, so the
+    // registers survive the routine's RET untouched.
+    machine.bus.memory.ram[0x0500] = 0x76;
+    machine.cpu.pc = 0xEDC4;
+    machine.cpu.sp = 0xBEF0;
+    machine.bus.memory.ram[0xBEF0] = 0x00;
+    machine.bus.memory.ram[0xBEF1] = 0x05;
+    machine.cpu.h = 0x20;
+    machine.cpu.l = 0x00;
+    machine.cpu.d = 0x00;
+    machine.cpu.e = data.len() as u8 - 1;
+    machine.cpu.c = 1;
+    machine.run_cycles(100);
+
+    assert_eq!(&machine.bus.memory.ram[0x2000..0x2005], &data, "data written");
+    assert!(machine.cpu.halted, "returned through the routine's RET");
+    assert_eq!(machine.cpu.pc, 0x0501);
+    assert_eq!(machine.cpu.b, checksum, "B = running checksum");
+    assert_eq!(machine.cpu.a, 0);
+    assert!(machine.cpu.flags.z, "checksum matched");
+    assert!(!machine.cpu.flags.cy);
+    assert_eq!(u16::from_le_bytes([machine.cpu.l, machine.cpu.h]), 0x2000, "HL restored");
+    assert_eq!(u16::from_le_bytes([machine.cpu.e, machine.cpu.d]), 0xFFFF, "DE = 0xFFFF");
+    assert!(!machine.bus.tape.flash_armed(), "block consumed");
+    assert!(!machine.bus.tape.is_playing(), "session over");
+}
+
+/// With C = 0 (check mode) the block-read intercept verifies the
+/// checksum without writing anything.
+#[test]
+fn flash_block_read_contract_check_only() {
+    let mut machine = boot();
+    let data = [9u8, 8, 7];
+    let checksum = data.iter().fold(0u8, |a, &b| a.wrapping_add(b));
+    machine.bus.tape_play_session(vec![PlayItem {
+        data: [data.as_slice(), &[checksum]].concat(),
+        head: false,
+        flash: true,
+    }]);
+    machine.bus.memory.ram[0x2000] = 0xEE;
+    machine.bus.memory.ram[0x0500] = 0x76;
+
+    machine.cpu.pc = 0xEDC4;
+    machine.cpu.sp = 0xBEF0;
+    machine.bus.memory.ram[0xBEF0] = 0x00;
+    machine.bus.memory.ram[0xBEF1] = 0x05;
+    machine.cpu.h = 0x20;
+    machine.cpu.l = 0x00;
+    machine.cpu.d = 0x00;
+    machine.cpu.e = data.len() as u8 - 1;
+    machine.cpu.c = 0;
+    machine.run_cycles(100);
+
+    assert_eq!(machine.bus.memory.ram[0x2000], 0xEE, "check mode writes nothing");
+    assert!(machine.cpu.flags.z, "checksum matched");
+    assert_eq!(machine.cpu.b, checksum);
+}
+
+/// A checksum mismatch must surface as carry (the callers' error
+/// branch) with Z clear.
+#[test]
+fn flash_block_read_contract_bad_checksum() {
+    let mut machine = boot();
+    machine.bus.tape_play_session(vec![PlayItem {
+        data: vec![1, 2, 3, 0xFF], // real checksum is 6
+        head: false,
+        flash: true,
+    }]);
+    machine.bus.memory.ram[0x0500] = 0x76;
+    machine.cpu.pc = 0xEDC4;
+    machine.cpu.sp = 0xBEF0;
+    machine.bus.memory.ram[0xBEF0] = 0x00;
+    machine.bus.memory.ram[0xBEF1] = 0x05;
+    machine.cpu.h = 0x20;
+    machine.cpu.l = 0x00;
+    machine.cpu.d = 0x00;
+    machine.cpu.e = 2;
+    machine.cpu.c = 1;
+    machine.run_cycles(100);
+    assert!(machine.cpu.flags.cy, "mismatch must set carry");
+    assert!(!machine.cpu.flags.z);
+}
+
+/// The byte-read intercept contract: entering `EB6C` while the deck
+/// serves a flash block returns the next byte with all flags clear,
+/// and reports carry (the timeout path) once the data runs out.
+#[test]
+fn flash_byte_read_contract() {
+    let mut machine = boot();
+    machine.bus.tape_play_session(vec![PlayItem {
+        data: vec![0xAB, 0xCD, 0x42],
+        head: false,
+        flash: true,
+    }]);
+    machine.bus.memory.ram[0x0500] = 0x76; // HLT at the fake return
+    for (n, expect) in [0xABu8, 0xCD, 0x42].into_iter().enumerate() {
+        machine.cpu.pc = 0xEB6C;
+        machine.cpu.sp = 0xBEF0;
+        machine.bus.memory.ram[0xBEF0] = 0x00;
+        machine.bus.memory.ram[0xBEF1] = 0x05;
+        machine.cpu.halted = false;
+        machine.cpu.a = 0x00;
+        machine.cpu.flags.cy = true;
+        machine.cpu.flags.z = true;
+        machine.run_cycles(20);
+        assert_eq!(machine.cpu.a, expect);
+        assert!(machine.cpu.halted, "returned through the routine's RET");
+        assert_eq!(machine.cpu.pc, 0x0501);
+        assert!(!machine.cpu.flags.cy);
+        assert!(!machine.cpu.flags.z, "flags are clear on success");
+        // The last byte ends the block (and the session) itself.
+        assert_eq!(machine.bus.tape.flash_armed(), n < 2);
+    }
+    assert!(!machine.bus.tape.is_playing(), "session over");
+}
+
+/// MGLD through a flash session: the header plays for real (with the
+/// shortened leader), the body is served through the intercepts. The
+/// whole load takes barely over a second of emulated time.
+#[test]
+fn mgld_flash_loads_the_file() {
+    let mut machine = boot();
+    let block = loadable_file();
+    use Key::*;
+    type_command(&mut machine, &[M, G, L, D, Space, Digit0, Digit0, Enter]);
+
+    machine.bus.tape_play_session(vec![
+        PlayItem {
+            data: block.header_bytes.clone(),
+            head: true,
+            flash: true,
+        },
+        PlayItem {
+            data: block.body_bytes.clone(),
+            head: false,
+            flash: true,
+        },
+    ]);
+    let mut frames = 0;
+    while machine.bus.tape.is_playing() {
+        frames += 1;
+        assert!(frames < 300, "flash load did not finish");
+        machine.step_frame();
+    }
+    assert!(
+        frames < 120,
+        "flash load took {frames} frames — barely faster than real playback"
+    );
+
+    // Let the monitor leave the load routine and settle.
+    for _ in 0..60 {
+        machine.step_frame();
+    }
+    let ram = &machine.bus.memory.ram;
+    for (i, &expect) in block.content().iter().enumerate() {
+        assert_eq!(ram[0x1000 + i], expect, "RAM mismatch at +{i}");
+    }
     assert!(!machine.bus.tape.is_playing());
 }
 
