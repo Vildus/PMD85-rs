@@ -315,7 +315,8 @@ fn mgsv_records_a_save() {
     // MGSV number start end — the monitor pauses, sends the leader,
     // the 15 header bytes and the body through the 8251, all paced by
     // the deck's transmitter throttle. The file number is a two-digit
-    // hex field (parsed by PAIRIN), so `0` alone is a syntax error.
+    // decimal field (the ROM's EA54 parser weights the digits ×10
+    // and caps the value at 99), so `0` alone is a syntax error.
     use Key::*;
     type_command(
         &mut machine,
@@ -360,4 +361,75 @@ fn mgsv_records_a_save() {
     for (i, &expect) in content.iter().enumerate() {
         assert_eq!(machine2.bus.memory.ram[0x2000 + i], expect, "reload +{i}");
     }
+}
+
+/// The MGLD/MGSV file number is parsed with DECIMAL weighting by the
+/// monitor (ROM EA54: value = 10·hi + lo, capped at 99) — not as a
+/// hex byte. `MGSV 17` must therefore record the header number as
+/// binary 17 (0x11), which is what GPMD85-style tape browsers
+/// display and what `MGLD 17` later matches.
+#[test]
+fn mgsv_file_number_is_decimal() {
+    let mut machine = boot();
+    for i in 0..17usize {
+        machine.bus.memory.ram[0x2000 + i] = 0xC0 ^ i as u8;
+    }
+
+    use Key::*;
+    type_command(
+        &mut machine,
+        &[
+            M, G, S, V, Space, Digit1, Digit7, Space, Digit2, Digit0, Digit0, Digit0, Space, Digit2,
+            Digit0, Digit1, Digit0, Enter,
+        ],
+    );
+    for _ in 0..900 {
+        machine.step_frame();
+    }
+    assert!(!machine.bus.tape.is_recording(), "recorder still active");
+
+    let mut tape = Tape::default();
+    tape.append_ptp_stream(&machine.bus.tape.take_recorded());
+    let h = tape.blocks[0].header.as_ref().expect("header");
+    assert_eq!(h.number, 17, "MGSV 17 must record binary 17 (0x11)");
+}
+
+/// The MGLD counterpart: a file whose header number byte is 0x43
+/// (67 decimal, like BASIC files in the wild) is loaded by typing
+/// `MGLD 67` — and NOT by typing `MGLD 43`, which the monitor
+/// parses as 43 decimal (0x2B).
+#[test]
+fn mgld_file_number_is_decimal() {
+    let mut content: Vec<u8> = (0..32u16).map(|i| (i as u8) ^ 0xA5).collect();
+    content[0] = 0x76;
+    let block = make_file(0x43, b'?', "DECIMAL", 0x1000, &content).unwrap();
+
+    use Key::*;
+
+    let mut machine = boot();
+    type_command(&mut machine, &[M, G, L, D, Space, Digit6, Digit7, Enter]);
+    assert!(
+        play_file(&mut machine, &block, 900),
+        "playback did not finish"
+    );
+    for _ in 0..60 {
+        machine.step_frame();
+    }
+    for (i, &expect) in content.iter().enumerate() {
+        assert_eq!(machine.bus.memory.ram[0x1000 + i], expect, "MGLD 67 +{i}");
+    }
+
+    // The hex-style reading of the same number must fail to match.
+    let mut machine = boot();
+    type_command(&mut machine, &[M, G, L, D, Space, Digit4, Digit3, Enter]);
+    assert!(
+        play_file(&mut machine, &block, 900),
+        "playback did not finish"
+    );
+    for _ in 0..60 {
+        machine.step_frame();
+    }
+    let loaded = (0..content.len())
+        .any(|i| machine.bus.memory.ram[0x1000 + i] == content[i]);
+    assert!(!loaded, "MGLD 43 must not load file number 0x43");
 }

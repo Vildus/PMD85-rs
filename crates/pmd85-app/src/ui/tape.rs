@@ -20,7 +20,8 @@ use std::path::PathBuf;
 pub struct ImportDraft {
     /// Raw content file chosen in the dialog.
     pub path: PathBuf,
-    /// File number on the tape (hex).
+    /// File number on the tape (decimal 0..99, as typed into
+    /// MGLD/MGSV on the machine).
     pub number: String,
     /// Block type character (`?`, `B`, ...).
     pub block_type: String,
@@ -113,10 +114,10 @@ fn toolbar(ui: &mut egui::Ui, app: &mut App, _theme: &Theme) {
             .clicked()
         {
             if let Some(path) = rfd::FileDialog::new().pick_file() {
-                let number = app.tape.files().len().min(0xFF);
+                let number = app.tape.files().len().min(99);
                 app.ui.tape_import = Some(ImportDraft {
                     name: file_stem(&path),
-                    number: format!("{number:02X}"),
+                    number: fmt_number(number as u8),
                     block_type: "?".into(),
                     start: "0000".into(),
                     path,
@@ -372,12 +373,13 @@ fn file_list(ui: &mut egui::Ui, app: &mut App, theme: &Theme) {
                         let block = &blocks[file.block];
 
                         // ---- file row ----
-                        // The number is the two-digit ID typed into
-                        // MGLD/MGSV.
+                        // The number is the two-digit decimal ID
+                        // typed into MGLD/MGSV (the monitor parses
+                        // it with decimal weighting, 00..99).
                         let number = block
                             .header
                             .as_ref()
-                            .map(|h| format!("{:02X}", h.number))
+                            .map(|h| fmt_number(h.number))
                             .unwrap_or_else(|| "\u{2014}".into());
                         ui.label(
                             egui::RichText::new(number).size(12.0).monospace(),
@@ -388,7 +390,7 @@ fn file_list(ui: &mut egui::Ui, app: &mut App, theme: &Theme) {
                             block
                                 .header
                                 .as_ref()
-                                .map(|h| format!("{:02X}", h.number))
+                                .map(|h| fmt_number(h.number))
                                 .unwrap_or_else(|| "?".into())
                         ));
                         ui.label(
@@ -490,8 +492,7 @@ fn file_list(ui: &mut egui::Ui, app: &mut App, theme: &Theme) {
 
 /// Validate the draft and append the file to the tape.
 fn import_draft(app: &mut App, draft: &ImportDraft) -> Result<(), String> {
-    let number = u8::from_str_radix(draft.number.trim(), 16)
-        .map_err(|_| format!("file number {:?} is not hex", draft.number))?;
+    let number = parse_number(&draft.number)?;
     let start = u16::from_str_radix(draft.start.trim(), 16)
         .map_err(|_| format!("start address {:?} is not hex", draft.start))?;
     let block_type = draft
@@ -538,8 +539,8 @@ fn status(ui: &mut egui::Ui, app: &mut App, theme: &Theme) {
     });
     ui.label(
         egui::RichText::new(
-            "Load: type MGLD nn (file number) on the machine. Save: \
-             MGSV nn start end \u{2014} recorded back into this tape.",
+            "Load: type MGLD nn (file number, 00-99 decimal) on the machine. \
+             Save: MGSV nn start end \u{2014} recorded back into this tape.",
         )
         .size(11.0)
         .color(c(&theme.text_weak)),
@@ -557,6 +558,30 @@ fn fmt_type(block_type: u8) -> String {
     match char::from_u32(block_type as u32) {
         Some(ch) if ch.is_ascii_graphic() => ch.to_string(),
         _ => format!("{block_type:02X}"),
+    }
+}
+
+/// The file number as displayed in the tape list. The monitor parses
+/// the MGLD/MGSV number with decimal weighting (ROM `EA54`: value =
+/// 10·hi + lo, capped at 99), so a header byte of 0x43 means file
+/// 67 — and `MGLD 67` is what loads it.
+fn fmt_number(number: u8) -> String {
+    format!("{number:02}")
+}
+
+/// Parse the import draft's file number: a decimal 0..=99, the
+/// range the monitor's MGLD/MGSV accepts.
+fn parse_number(text: &str) -> Result<u8, String> {
+    let n: u32 = text
+        .trim()
+        .parse()
+        .map_err(|_| format!("file number {text:?} is not a decimal number"))?;
+    if n > 99 {
+        Err(format!(
+            "file number {n} is out of range: MGLD/MGSV accept 00..=99"
+        ))
+    } else {
+        Ok(n as u8)
     }
 }
 
@@ -581,4 +606,34 @@ fn file_stem(path: &std::path::Path) -> String {
         .take(8)
         .collect::<String>()
         .to_uppercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ID column shows the file number the way the monitor (and
+    /// GPMD85's tape browser) understand it: decimal. A BASIC file
+    /// with header byte 0x43 is file 67, loaded with `MGLD 67`.
+    #[test]
+    fn number_column_is_decimal() {
+        assert_eq!(fmt_number(0x43), "67");
+        assert_eq!(fmt_number(0x37), "55");
+        assert_eq!(fmt_number(0x11), "17");
+        assert_eq!(fmt_number(0), "00");
+        assert_eq!(fmt_number(99), "99");
+    }
+
+    /// The import draft accepts decimal 0..=99 only — the range
+    /// MGLD/MGSV can type — so every imported file stays loadable.
+    #[test]
+    fn import_number_is_decimal_0_to_99() {
+        assert_eq!(parse_number("67").unwrap(), 0x43);
+        assert_eq!(parse_number(" 00 ").unwrap(), 0);
+        assert_eq!(parse_number("99").unwrap(), 99);
+        assert!(parse_number("43A").is_err(), "hex suffix rejected");
+        assert!(parse_number("1A").is_err(), "hex digits rejected");
+        assert!(parse_number("100").is_err(), "over the monitor's cap");
+        assert!(parse_number("").is_err());
+    }
 }
