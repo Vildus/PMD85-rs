@@ -13,6 +13,7 @@ use crate::chips::usart8251::I8251;
 use crate::cpu::{Bus, Cpu, Flags};
 use crate::keyboard::Keyboard;
 use crate::model::Model;
+use crate::state::{StateError, StateReader, StateWriter};
 use crate::tapedeck::{PlayItem, TapeDeck};
 
 /// CPU clock: Tesla MHB8080A at 2.048 MHz.
@@ -155,6 +156,57 @@ impl MachineBus {
     /// the blocks are queued in the deck and fed one after another.
     pub fn tape_play_session(&mut self, items: Vec<PlayItem>) {
         self.tape.play_session(items);
+    }
+
+    /// Serialize the bus contents (everything but the CPU, which is
+    /// written separately by [`Machine::save_state`]) into a save
+    /// state. The cassette deck is deliberately not covered: a state
+    /// can only be taken while it is idle.
+    pub(crate) fn save_state(&self, w: &mut StateWriter) {
+        self.keyboard.save_state(w);
+        self.memory.save_state(w);
+        self.ppi_system.save_state(w);
+        self.ppi_gpio.save_state(w);
+        self.ppi_ims2.save_state(w);
+        self.ppi_rom.save_state(w);
+        self.pit.save_state(w);
+        self.uart.save_state(w);
+        w.bool(self.speaker_level);
+        w.bool(self.led);
+        w.len(self.speaker_edges.len());
+        for edge in self.speaker_edges.edges() {
+            w.u64(edge.cycle);
+            w.bool(edge.level);
+        }
+        w.bool(self.pending_speaker_edge);
+        w.u64(self.total_cycles);
+    }
+
+    /// Restore the bus state written by [`MachineBus::save_state`].
+    /// The deck lines (8251 DSR, transmit gate) are normalized to the
+    /// idle state afterwards, as the deck itself always restarts idle.
+    pub(crate) fn load_state(&mut self, r: &mut StateReader) -> Result<(), StateError> {
+        self.keyboard.load_state(r)?;
+        self.memory.load_state(r)?;
+        self.ppi_system.load_state(r)?;
+        self.ppi_gpio.load_state(r)?;
+        self.ppi_ims2.load_state(r)?;
+        self.ppi_rom.load_state(r)?;
+        self.pit.load_state(r)?;
+        self.uart.load_state(r)?;
+        self.speaker_level = r.bool()?;
+        self.led = r.bool()?;
+        for _ in 0..r.len()? {
+            let edge = crate::audio::SpeakerEdge {
+                cycle: r.u64()?,
+                level: r.bool()?,
+            };
+            self.speaker_edges.push(edge);
+        }
+        self.pending_speaker_edge = r.bool()?;
+        self.total_cycles = r.u64()?;
+        self.tape.hard_reset(&mut self.uart);
+        Ok(())
     }
 
     /// Emulated CPU cycles executed since power-on.
@@ -459,6 +511,108 @@ impl Machine {
             self.cpu.a = b;
         }
         self.cpu.pc = page | 0x9B;
+    }
+
+    // ----- save states -------------------------------------------------
+
+    /// Serialize the machine into a self-contained save state: CPU,
+    /// RAM, keyboard, peripheral chips and the cycle counter, plus the
+    /// ROM module image. The monitor ROM itself is only fingerprinted
+    /// (length + CRC): on restore it must match the one the target
+    /// machine runs.
+    ///
+    /// The cassette deck is not part of the snapshot, so this fails
+    /// with [`StateError::TapeBusy`] while a tape session (playback
+    /// or recording) is in progress.
+    pub fn save_state(&self) -> Result<Vec<u8>, StateError> {
+        if self.bus.tape.is_active() {
+            return Err(StateError::TapeBusy);
+        }
+        let mut w = StateWriter::new();
+        w.bytes(MAGIC);
+        w.u32(STATE_VERSION);
+        w.u8(model_tag(self.bus.model));
+        let (rom_len, rom_crc) = self.bus.memory.monitor_signature();
+        w.u16(rom_len);
+        w.u8(rom_crc);
+        match &self.bus.memory.rom_module {
+            Some(module) => {
+                w.len(module.len());
+                w.bytes(module);
+            }
+            None => w.len(0),
+        }
+        self.bus.save_state(&mut w);
+        self.cpu.save_state(&mut w);
+        Ok(w.finish())
+    }
+
+    /// Restore a state written by [`Machine::save_state`]. The load
+    /// is transactional: the state is parsed into a fresh machine and
+    /// only applied on success, so a corrupt or foreign file never
+    /// half-mutates the running one. The cassette deck always comes
+    /// back idle (a state cannot be taken while it runs).
+    pub fn restore_state(&mut self, data: &[u8]) -> Result<(), StateError> {
+        let mut r = StateReader::new(data);
+        let mut magic = [0u8; 4];
+        r.read_into(&mut magic)?;
+        if &magic != MAGIC {
+            return Err(StateError::BadMagic);
+        }
+        let version = r.u32()?;
+        if version != STATE_VERSION {
+            return Err(StateError::UnsupportedVersion(version));
+        }
+        let tag = r.u8()?;
+        if model_from_tag(tag) != Some(self.bus.model) {
+            return Err(StateError::ModelMismatch);
+        }
+        let rom_len = r.u16()?;
+        let rom_crc = r.u8()?;
+        if (rom_len, rom_crc) != self.bus.memory.monitor_signature() {
+            return Err(StateError::MonitorMismatch);
+        }
+        let module = match r.len()? {
+            0 => None,
+            len => Some(r.take_bytes(len)?.to_vec()),
+        };
+
+        // Parse into a fresh machine; only a complete success replaces
+        // the running one.
+        let monitor = self.bus.memory.monitor().to_vec();
+        let mut bus = MachineBus::new(self.bus.model, &monitor, module);
+        bus.load_state(&mut r)?;
+        let mut cpu = Cpu::new();
+        cpu.load_state(&mut r)?;
+        if !r.is_empty() {
+            return Err(StateError::TrailingBytes);
+        }
+        self.bus = bus;
+        self.cpu = cpu;
+        Ok(())
+    }
+}
+
+/// Save-state format magic and version.
+const MAGIC: &[u8; 4] = b"PMDS";
+const STATE_VERSION: u32 = 1;
+
+fn model_tag(model: Model) -> u8 {
+    match model {
+        Model::Pmd851 => 1,
+        Model::Pmd852 => 2,
+        Model::Pmd852a => 3,
+        Model::Pmd853 => 4,
+    }
+}
+
+fn model_from_tag(tag: u8) -> Option<Model> {
+    match tag {
+        1 => Some(Model::Pmd851),
+        2 => Some(Model::Pmd852),
+        3 => Some(Model::Pmd852a),
+        4 => Some(Model::Pmd853),
+        _ => None,
     }
 }
 

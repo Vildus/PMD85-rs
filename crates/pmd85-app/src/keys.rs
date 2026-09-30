@@ -136,6 +136,35 @@ pub fn map(event: &KeyEvent) -> &'static [Key] {
     keys_for(code)
 }
 
+/// Actions bound to host-key shortcuts: taken while the host-key
+/// modifier (left Alt) is held, during which no keys reach the
+/// machine. The chords live in a namespace the PMD 85 mapping never
+/// touches (every F-key alone maps to a PMD `K` function key).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostShortcut {
+    /// Alt+F5: save to the quick slot, no dialog.
+    QuickSave,
+    /// Alt+F9: restore the quick slot, no dialog.
+    QuickLoad,
+}
+
+/// The host-key shortcut bound to a physical key (checked only while
+/// the host-key modifier is held).
+pub fn host_shortcut(code: KeyCode) -> Option<HostShortcut> {
+    match code {
+        KeyCode::F5 => Some(HostShortcut::QuickSave),
+        KeyCode::F9 => Some(HostShortcut::QuickLoad),
+        _ => None,
+    }
+}
+
+/// Whether holding this key switches the keyboard to host shortcuts:
+/// left Alt only. Right Alt is AltGr on European layouts and must
+/// keep typing `{ } [ ]` and friends into the machine.
+pub fn is_host_modifier(code: KeyCode) -> bool {
+    code == KeyCode::AltLeft
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,5 +224,32 @@ mod tests {
     #[test]
     fn unknown_keys_map_to_nothing() {
         assert!(keys_for(KeyCode::NumLock).is_empty());
+    }
+
+    #[test]
+    fn host_shortcuts_live_in_the_alt_namespace() {
+        assert_eq!(host_shortcut(KeyCode::F5), Some(HostShortcut::QuickSave));
+        assert_eq!(host_shortcut(KeyCode::F9), Some(HostShortcut::QuickLoad));
+        assert_eq!(host_shortcut(KeyCode::F4), None);
+        assert_eq!(host_shortcut(KeyCode::KeyS), None);
+    }
+
+    #[test]
+    fn only_left_alt_is_the_host_modifier() {
+        assert!(is_host_modifier(KeyCode::AltLeft));
+        // AltGr (right Alt) types special characters; it must not
+        // swallow keys from the machine.
+        assert!(!is_host_modifier(KeyCode::AltRight));
+        assert!(!is_host_modifier(KeyCode::SuperLeft));
+        assert!(!is_host_modifier(KeyCode::ControlLeft));
+    }
+
+    #[test]
+    fn function_keys_still_reach_the_machine() {
+        // The quick-save chords borrow the F-keys; without the host
+        // modifier they must keep pressing PMD K-keys (this pins the
+        // collision the shortcuts would otherwise introduce).
+        assert_eq!(keys_for(KeyCode::F5), &[Key::K4]);
+        assert_eq!(keys_for(KeyCode::F9), &[Key::K8]);
     }
 }

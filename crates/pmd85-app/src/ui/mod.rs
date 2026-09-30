@@ -809,4 +809,153 @@ mod tests {
         assert!(app.tape.dirty);
         assert_eq!(app.tape.export_file(0).unwrap(), content);
     }
+
+    // ----- save states -------------------------------------------------
+
+    use std::path::PathBuf;
+
+    /// A scratch settings dir of the test's own (tests run in
+    /// parallel; the quick slot lives next to the settings).
+    fn state_scratch_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "pmd85-app-state-{}-{label}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn save_and_load_state_round_trips() {
+        let mut app = test_app();
+        let dir = state_scratch_dir("roundtrip");
+        let path = dir.join("state.pss");
+
+        // Boot, leave a mark and take a state.
+        app.run_frames(500);
+        for i in 0..32u16 {
+            app.machine.bus.memory.ram[0x3000 + i as usize] = (i ^ 0x99) as u8;
+        }
+        let pc_at_save = app.machine.cpu.pc;
+        app.save_state_to(&path).expect("save while idle");
+
+        // Move on, then come back.
+        app.run_frames(400);
+        assert_ne!(app.machine.cpu.pc, pc_at_save, "the machine never moved");
+        app.load_state_from(&path).expect("load round-trips");
+
+        assert_eq!(app.machine.cpu.pc, pc_at_save);
+        for i in 0..32u16 {
+            assert_eq!(
+                app.machine.bus.memory.ram[0x3000 + i as usize],
+                (i ^ 0x99) as u8
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn quick_save_and_load_use_the_settings_dir() {
+        let mut app = test_app();
+        let dir = state_scratch_dir("quick");
+        app.set_settings_dir(dir.clone());
+        app.run_frames(500);
+
+        // Quick load before anything was saved: a notification, no
+        // panic, the machine untouched.
+        let pc = app.machine.cpu.pc;
+        app.quick_load_state();
+        assert_eq!(
+            app.notifications().back().map(|(m, _)| m.clone()),
+            Some("State load failed: No such file or directory (os error 2)".into())
+        );
+        assert_eq!(app.machine.cpu.pc, pc);
+
+        app.quick_save_state();
+        assert!(dir.join("states/quick.pss").exists(), "quick slot missing");
+        assert_eq!(
+            app.notifications().back().map(|(m, _)| m.clone()),
+            Some("State saved (quick slot)".into())
+        );
+
+        app.run_frames(300);
+        app.quick_load_state();
+        assert_eq!(app.machine.cpu.pc, pc, "quick load did not restore");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_state_is_refused_while_the_tape_runs() {
+        let mut app = test_app();
+        let dir = state_scratch_dir("tapebusy");
+        let path = dir.join("state.pss");
+        app.tape.flash = false;
+        app.tape.tape.blocks.push(
+            tape::make_file(0, b'?', "LOADTST", 0x1000, &[0x76, 1, 2, 3]).unwrap(),
+        );
+
+        app.run_frames(500);
+        use Key::*;
+        type_command(&mut app, &[M, G, L, D, Space, Digit0, Digit0, Enter]);
+        app.play_tape_file(0);
+        assert!(app.tape.is_playing());
+        assert!(!app.can_save_state(), "save offered while the tape plays");
+
+        // Both the file save and the quick slot are refused.
+        assert!(app.save_state_to(&path).is_err());
+        assert!(!path.exists());
+        app.quick_save_state();
+        assert!(
+            !dir.join("states/quick.pss").exists(),
+            "quick slot written while the tape plays"
+        );
+        assert!(
+            app.notifications()
+                .back()
+                .map(|(m, _)| m.contains("tape"))
+                .unwrap_or(false),
+            "the refusal must explain itself"
+        );
+
+        // Once the session is over, saving works again.
+        for _ in 0..2000 {
+            if !app.tape.is_playing() {
+                break;
+            }
+            app.run_frames(1);
+        }
+        assert!(app.can_save_state());
+        app.save_state_to(&path).expect("save after the session ends");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_state_reports_corrupt_files_and_repaints() {
+        let mut app = test_app();
+        let dir = state_scratch_dir("corrupt");
+        let bad = dir.join("bad.pss");
+        std::fs::write(&bad, b"definitely not a save state").unwrap();
+
+        app.run_frames(500);
+        let pc = app.machine.cpu.pc;
+        let cycles = app.machine.bus.total_cycles();
+        let err = app.load_state_from(&bad).unwrap_err();
+        assert_eq!(err, "State: not a PMD 85 save state");
+        assert_eq!(app.machine.cpu.pc, pc, "corrupt load mutated the machine");
+        assert_eq!(app.machine.bus.total_cycles(), cycles);
+
+        // Loading while paused repaints the screen immediately.
+        app.set_running(false);
+        assert!(app.decode_buf.is_empty(), "nothing decoded yet");
+        let good = dir.join("good.pss");
+        app.save_state_to(&good).unwrap();
+        app.machine.bus.memory.ram[0xC000] ^= 0xFF; // scribble VRAM
+        app.load_state_from(&good).unwrap();
+        assert!(
+            !app.decode_buf.is_empty(),
+            "the screen was not decoded on load"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

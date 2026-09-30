@@ -50,6 +50,43 @@ impl Default for I8251 {
 }
 
 impl I8251 {
+    /// Serialize the interface state into a save state. The DSR and
+    /// transmit-gate lines are driven by the cassette deck and are not
+    /// part of the snapshot: a restored machine normalizes them through
+    /// the (always idle) deck.
+    pub(crate) fn save_state(&self, w: &mut crate::state::StateWriter) {
+        match self.mode_word {
+            None => w.bool(false),
+            Some(v) => {
+                w.bool(true);
+                w.u8(v);
+            }
+        }
+        w.u8(self.command);
+        w.u8(self.status);
+        w.u8(self.sync_chars_pending);
+        w.u8(self.rx_data);
+        w.bool(self.dtr);
+        w.bool(self.rts);
+        w.len(self.tx_log.len());
+        w.bytes(&self.tx_log);
+    }
+
+    /// Restore the interface state written by [`I8251::save_state`].
+    pub(crate) fn load_state(
+        &mut self,
+        r: &mut crate::state::StateReader,
+    ) -> Result<(), crate::state::StateError> {
+        self.mode_word = r.bool()?.then(|| r.u8()).transpose()?;
+        self.command = r.u8()?;
+        self.status = r.u8()?;
+        self.sync_chars_pending = r.u8()?;
+        self.rx_data = r.u8()?;
+        self.dtr = r.bool()?;
+        self.rts = r.bool()?;
+        self.tx_log = r.vec()?;
+        Ok(())
+    }
     pub fn new() -> Self {
         I8251 {
             mode_word: None,

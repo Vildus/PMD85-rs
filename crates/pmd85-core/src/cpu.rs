@@ -109,6 +109,46 @@ impl Cpu {
         self.pending_interrupt = Some(opcode);
     }
 
+    /// Serialize the full CPU state (registers, flags, interrupt and
+    /// halt logic, cycle counter) into a save state.
+    pub(crate) fn save_state(&self, w: &mut crate::state::StateWriter) {
+        for r in [self.a, self.b, self.c, self.d, self.e, self.h, self.l] {
+            w.u8(r);
+        }
+        w.u16(self.sp);
+        w.u16(self.pc);
+        w.u8(self.flags.pack());
+        w.bool(self.iff);
+        w.bool(self.ei_delay);
+        w.bool(self.halted);
+        match self.pending_interrupt {
+            None => w.u8(0),
+            Some(op) => w.u8(1 | (op << 1)),
+        }
+        w.u64(self.cycles);
+    }
+
+    /// Restore the CPU state written by [`Cpu::save_state`].
+    pub(crate) fn load_state(&mut self, r: &mut crate::state::StateReader) -> Result<(), crate::state::StateError> {
+        self.a = r.u8()?;
+        self.b = r.u8()?;
+        self.c = r.u8()?;
+        self.d = r.u8()?;
+        self.e = r.u8()?;
+        self.h = r.u8()?;
+        self.l = r.u8()?;
+        self.sp = r.u16()?;
+        self.pc = r.u16()?;
+        self.flags = Flags::unpack(r.u8()?);
+        self.iff = r.bool()?;
+        self.ei_delay = r.bool()?;
+        self.halted = r.bool()?;
+        let pending = r.u8()?;
+        self.pending_interrupt = (pending != 0).then_some(pending >> 1);
+        self.cycles = r.u64()?;
+        Ok(())
+    }
+
     /// Run one instruction (or service a pending interrupt). Returns the
     /// number of T-states consumed.
     pub fn step<B: Bus>(&mut self, bus: &mut B) -> u32 {

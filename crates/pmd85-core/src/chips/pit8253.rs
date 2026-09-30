@@ -65,6 +65,57 @@ impl Counter {
         }
     }
 
+    /// Serialize the counter state into a save state.
+    fn save_state(&self, w: &mut crate::state::StateWriter) {
+        w.u8(self.mode);
+        w.bool(self.bcd);
+        w.u8(match self.access {
+            AccessMode::Latch => 0,
+            AccessMode::Lsb => 1,
+            AccessMode::Msb => 2,
+            AccessMode::LsbMsb => 3,
+        });
+        w.u16(self.count);
+        w.u16(self.initial);
+        match self.latch {
+            None => w.bool(false),
+            Some(v) => {
+                w.bool(true);
+                w.u16(v);
+            }
+        }
+        w.bool(self.null_count);
+        w.bool(self.msb_next);
+        w.bool(self.out);
+        w.bool(self.gate);
+        w.bool(self.phase_high);
+    }
+
+    /// Restore the counter state written by [`Counter::save_state`].
+    fn load_state(
+        &mut self,
+        r: &mut crate::state::StateReader,
+    ) -> Result<(), crate::state::StateError> {
+        self.mode = r.u8()?;
+        self.bcd = r.bool()?;
+        let access = r.u8()?;
+        self.access = match access {
+            0 => AccessMode::Latch,
+            1 => AccessMode::Lsb,
+            2 => AccessMode::Msb,
+            _ => AccessMode::LsbMsb,
+        };
+        self.count = r.u16()?;
+        self.initial = r.u16()?;
+        self.latch = r.bool()?.then(|| r.u16()).transpose()?;
+        self.null_count = r.bool()?;
+        self.msb_next = r.bool()?;
+        self.out = r.bool()?;
+        self.gate = r.bool()?;
+        self.phase_high = r.bool()?;
+        Ok(())
+    }
+
     fn reset(&mut self) {
         *self = Counter::new();
     }
@@ -303,6 +354,24 @@ impl I8253 {
         I8253 {
             counters: [Counter::new(), Counter::new(), Counter::new()],
         }
+    }
+
+    /// Serialize all three counters into a save state.
+    pub(crate) fn save_state(&self, w: &mut crate::state::StateWriter) {
+        for c in &self.counters {
+            c.save_state(w);
+        }
+    }
+
+    /// Restore the counter state written by [`I8253::save_state`].
+    pub(crate) fn load_state(
+        &mut self,
+        r: &mut crate::state::StateReader,
+    ) -> Result<(), crate::state::StateError> {
+        for c in &mut self.counters {
+            c.load_state(r)?;
+        }
+        Ok(())
     }
 
     pub fn reset(&mut self) {

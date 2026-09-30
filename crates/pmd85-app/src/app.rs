@@ -648,6 +648,71 @@ impl App {
         self.persist();
     }
 
+    // ----- save states -------------------------------------------------
+
+    /// Whether a save state can be taken right now: the cassette deck
+    /// must be idle (states never cover a running tape session).
+    pub fn can_save_state(&self) -> bool {
+        !self.machine.bus.tape.is_active()
+    }
+
+    /// Serialize the machine into `path` as a save state. Fails while
+    /// the tape plays or records (see [`App::can_save_state`]).
+    pub fn save_state_to(&mut self, path: &Path) -> Result<(), String> {
+        let bytes = self
+            .machine
+            .save_state()
+            .map_err(|e| format!("State: {e}"))?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("State save failed: {e}"))?;
+        }
+        std::fs::write(path, &bytes).map_err(|e| format!("State save failed: {e}"))
+    }
+
+    /// Restore the machine from a save state at `path`. A tape session
+    /// currently running is discarded (a snapshot can only ever have
+    /// been taken with the deck idle) and the screen repaints, also
+    /// while paused.
+    pub fn load_state_from(&mut self, path: &Path) -> Result<(), String> {
+        let bytes = std::fs::read(path).map_err(|e| format!("State load failed: {e}"))?;
+        self.machine
+            .restore_state(&bytes)
+            .map_err(|e| format!("State: {e}"))?;
+        self.tape.play = false;
+        self.tape.was_recording = false;
+        self.refresh_screen();
+        Ok(())
+    }
+
+    /// The quick-save slot next to the persisted settings.
+    fn quick_state_path(&self) -> Option<PathBuf> {
+        self.settings_dir
+            .as_ref()
+            .map(|dir| dir.join("states").join("quick.pss"))
+    }
+
+    /// Quick save (F5): overwrite the quick slot without a dialog.
+    pub fn quick_save_state(&mut self) {
+        let Some(path) = self.quick_state_path() else {
+            return;
+        };
+        match self.save_state_to(&path) {
+            Ok(()) => self.notify("State saved (quick slot)"),
+            Err(e) => self.notify(e),
+        }
+    }
+
+    /// Quick load (F9): restore the quick slot without a dialog.
+    pub fn quick_load_state(&mut self) {
+        let Some(path) = self.quick_state_path() else {
+            return;
+        };
+        match self.load_state_from(&path) {
+            Ok(()) => self.notify("State restored (quick slot)"),
+            Err(e) => self.notify(e),
+        }
+    }
+
     // ----- emulation -----
 
     /// Run `frames` emulated frames, pumping the tape deck between
@@ -709,6 +774,13 @@ impl App {
         }
 
         // Screen texture: decode VRAM and upload.
+        self.refresh_screen();
+    }
+
+    /// Decode the current VRAM into the screen texture. Runs every
+    /// emulated frame; also called directly after loading a save state
+    /// so a paused machine repaints immediately.
+    fn refresh_screen(&mut self) {
         let image = egui::ColorImage::from_rgba_unmultiplied(
             [SCREEN.0, SCREEN.1],
             vram::decode_into(&self.machine.bus.memory, self.profile, &mut self.decode_buf),

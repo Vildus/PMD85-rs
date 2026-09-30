@@ -60,6 +60,30 @@ impl I8255 {
         self.control
     }
 
+    /// Serialize the interface state into a save state.
+    pub(crate) fn save_state(&self, w: &mut crate::state::StateWriter) {
+        w.u8(self.control);
+        w.bytes(&self.outputs);
+        w.bool(self.pa_in);
+        w.bool(self.pb_in);
+        w.bool(self.pc_lower_in);
+        w.bool(self.pc_upper_in);
+    }
+
+    /// Restore the interface state written by [`I8255::save_state`].
+    pub(crate) fn load_state(
+        &mut self,
+        r: &mut crate::state::StateReader,
+    ) -> Result<(), crate::state::StateError> {
+        self.control = r.u8()?;
+        r.read_into(&mut self.outputs)?;
+        self.pa_in = r.bool()?;
+        self.pb_in = r.bool()?;
+        self.pc_lower_in = r.bool()?;
+        self.pc_upper_in = r.bool()?;
+        Ok(())
+    }
+
     pub fn is_mode_set(&self, word: u8) -> bool {
         word & 0x80 != 0
     }

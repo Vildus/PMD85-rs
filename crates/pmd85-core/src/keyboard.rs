@@ -227,6 +227,20 @@ impl Keyboard {
         self.matrix[col] & bit == 0
     }
 
+    /// Serialize the key matrix into a save state (held keys survive).
+    pub(crate) fn save_state(&self, w: &mut crate::state::StateWriter) {
+        w.bytes(&self.matrix);
+    }
+
+    /// Restore the key matrix written by [`Keyboard::save_state`].
+    pub(crate) fn load_state(
+        &mut self,
+        r: &mut crate::state::StateReader,
+    ) -> Result<(), crate::state::StateError> {
+        r.read_into(&mut self.matrix)?;
+        Ok(())
+    }
+
     /// Read the row lines for the given scan column (motherboard 8255
     /// port B): the selected column ANDed with the special Shift/Stop
     /// column 15.

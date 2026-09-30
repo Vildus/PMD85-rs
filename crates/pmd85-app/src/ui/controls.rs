@@ -62,6 +62,52 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                 ) {
                     app.reset();
                 }
+                // Save state: refused while the tape runs.
+                let can_save = app.can_save_state();
+                if icon_button(
+                    ui,
+                    icon::FLOPPY_DISK,
+                    can_save,
+                    if can_save {
+                        "Save state (the machine, RAM and all)"
+                    } else {
+                        "The tape is playing or recording; stop it to save states"
+                    },
+                    dim,
+                ) {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("PMD 85 save state", &["pss"])
+                        .set_file_name("state.pss")
+                        .save_file()
+                    {
+                        let path = if path.extension().is_none() {
+                            path.with_extension("pss")
+                        } else {
+                            path
+                        };
+                        match app.save_state_to(&path) {
+                            Ok(()) => app.notify("State saved"),
+                            Err(e) => app.notify(e),
+                        }
+                    }
+                }
+                if icon_button(
+                    ui,
+                    icon::FLOPPY_DISK_BACK,
+                    true,
+                    "Load state (Alt+F5 quick save, Alt+F9 quick load)",
+                    dim,
+                ) {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("PMD 85 save state", &["pss"])
+                        .pick_file()
+                    {
+                        match app.load_state_from(&path) {
+                            Ok(()) => app.notify("State restored"),
+                            Err(e) => app.notify(e),
+                        }
+                    }
+                }
 
                 ui.separator();
 

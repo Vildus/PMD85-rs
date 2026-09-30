@@ -68,6 +68,41 @@ impl Memory {
         self.pmd853_mapping
     }
 
+    /// Identity of the installed monitor ROM: length and checksum.
+    /// A save state records this and refuses to restore into a machine
+    /// running a different monitor.
+    pub(crate) fn monitor_signature(&self) -> (u16, u8) {
+        (
+            self.rom_len as u16,
+            crate::tape::crc8(&self.rom[..self.rom_len]),
+        )
+    }
+
+    /// The installed monitor ROM image (for rebuilding the machine
+    /// from a save state).
+    pub(crate) fn monitor(&self) -> &[u8] {
+        &self.rom[..self.rom_len]
+    }
+
+    /// Serialize the RAM image and memory-map flip-flops into a save
+    /// state (the ROMs themselves stay with the machine configuration).
+    pub(crate) fn save_state(&self, w: &mut crate::state::StateWriter) {
+        w.bytes(&self.ram[..]);
+        w.bool(self.startup_map);
+        w.bool(self.pmd853_mapping);
+    }
+
+    /// Restore the memory state written by [`Memory::save_state`].
+    pub(crate) fn load_state(
+        &mut self,
+        r: &mut crate::state::StateReader,
+    ) -> Result<(), crate::state::StateError> {
+        r.read_into(&mut self.ram[..])?;
+        self.startup_map = r.bool()?;
+        self.pmd853_mapping = r.bool()?;
+        Ok(())
+    }
+
     /// Notify that the CPU performed an I/O write: this clears the startup
     /// shadow map (MAME behavior) before the write is dispatched.
     pub fn note_io_write(&mut self) {

@@ -368,6 +368,14 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
         .show(ctx, |ui| {
             let theme = app.active_theme_data();
             legend(ui, &theme);
+            ui.label(
+                egui::RichText::new(
+                    "Host keys: hold left Alt to pause key mapping \u{2014} \
+                     Alt+F5 quick-saves a state, Alt+F9 restores it.",
+                )
+                .size(10.0)
+                .color(Theme::color(&theme.text_weak)),
+            );
             ui.add_space(4.0);
             let kb = app.machine.bus.keyboard.clone();
             let rows = main_block();

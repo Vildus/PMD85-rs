@@ -11,6 +11,7 @@ pub mod cpu;
 pub mod keyboard;
 pub mod machine;
 pub mod model;
+pub mod state;
 pub mod tape;
 pub mod tapedeck;
 pub mod vram;

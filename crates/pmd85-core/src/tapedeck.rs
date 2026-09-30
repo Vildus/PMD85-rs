@@ -313,6 +313,12 @@ impl TapeDeck {
         self.rx_state != RxState::Idle
     }
 
+    /// Whether the deck is playing a session or recording: save states
+    /// can only be taken while it is idle.
+    pub fn is_active(&self) -> bool {
+        self.is_playing() || self.is_recording()
+    }
+
     /// Whether the current block is being served through the
     /// flash-load intercepts (see the module docs).
     pub fn flash_armed(&self) -> bool {

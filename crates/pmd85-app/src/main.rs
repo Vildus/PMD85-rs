@@ -20,6 +20,7 @@ use egui::{Context, ViewportId};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
 use crate::app::App;
@@ -34,6 +35,9 @@ struct Windowing {
 struct Application {
     app: App,
     windowing: Option<Windowing>,
+    /// Left Alt is held: the keyboard is in host-shortcut mode and no
+    /// keys reach the machine until it is released.
+    alt_held: bool,
 }
 
 impl ApplicationHandler for Application {
@@ -104,16 +108,39 @@ impl ApplicationHandler for Application {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if !response.consumed {
-                    for key in keys::map(&event) {
-                        self.app
-                            .machine
-                            .bus
-                            .keyboard
-                            .set_key(*key, event.state.is_pressed());
+                    // Left Alt is the host-key modifier; while it is
+                    // held, the keyboard is in host-shortcut mode and
+                    // no keys are forwarded to the machine.
+                    if let PhysicalKey::Code(code) = event.physical_key {
+                        if keys::is_host_modifier(code) {
+                            self.alt_held = event.state.is_pressed();
+                        }
+                        if self.alt_held {
+                            if event.state.is_pressed() && !event.repeat {
+                                match keys::host_shortcut(code) {
+                                    Some(keys::HostShortcut::QuickSave) => {
+                                        self.app.quick_save_state()
+                                    }
+                                    Some(keys::HostShortcut::QuickLoad) => {
+                                        self.app.quick_load_state()
+                                    }
+                                    None => {}
+                                }
+                            }
+                        } else {
+                            for key in keys::map(&event) {
+                                self.app
+                                    .machine
+                                    .bus
+                                    .keyboard
+                                    .set_key(*key, event.state.is_pressed());
+                            }
+                        }
                     }
                 }
             }
             WindowEvent::Focused(false) => {
+                self.alt_held = false;
                 self.app.machine.bus.keyboard.reset();
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
@@ -206,6 +233,10 @@ fn main() {
     let app = App::new(ctx, &args, settings);
 
     let event_loop = EventLoop::new().expect("cannot create event loop");
-    let mut application = Application { app, windowing: None };
+    let mut application = Application {
+        app,
+        windowing: None,
+        alt_held: false,
+    };
     event_loop.run_app(&mut application).expect("event loop failed");
 }

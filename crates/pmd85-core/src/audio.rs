@@ -71,6 +71,11 @@ impl SpeakerEdgeLog {
     pub fn is_empty(&self) -> bool {
         self.edges.is_empty()
     }
+
+    /// The recorded edges, oldest first (for save states).
+    pub(crate) fn edges(&self) -> impl Iterator<Item = SpeakerEdge> + '_ {
+        self.edges.iter().copied()
+    }
 }
 
 /// Converts cycle-stamped speaker edges into a mono f32 sample stream.
