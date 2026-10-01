@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=PMD 85 — Tesla
+GenericName=PMD 85 emulator
+Comment=Emulator of the Tesla PMD 85 home computer
+# The @BIN@ placeholder is replaced with the built binary's path by
+# dist/install-user.sh.
+Exec=@BIN@ %f
+# Resolved through the icon theme; the name must match the app_id the
+# window sets (see APP_ID in crates/pmd85-app/src/main.rs).
+Icon=pmd85
+Terminal=false
+Categories=Game;Emulator;
+StartupWMClass=pmd85

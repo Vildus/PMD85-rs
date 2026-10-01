@@ -9,6 +9,7 @@ mod args;
 mod audio;
 mod catalog;
 mod config;
+mod icon;
 mod keys;
 mod speed;
 mod ui;
@@ -24,6 +25,11 @@ use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
 use crate::app::App;
+
+/// The application id: the Wayland `app_id` and the X11 `WM_CLASS`,
+/// which the taskbar matches against the installed `pmd85.desktop`
+/// (see `dist/`) to resolve the icon.
+pub const APP_ID: &str = "pmd85";
 
 /// One OS window with its egui painter and input state.
 struct Windowing {
@@ -47,7 +53,17 @@ impl ApplicationHandler for Application {
         }
         let attrs = Window::default_attributes()
             .with_title("PMD 85 \u{2014} Tesla")
-            .with_inner_size(winit::dpi::LogicalSize::new(980, 760));
+            .with_inner_size(winit::dpi::LogicalSize::new(980, 760))
+            .with_window_icon(icon::window_icon());
+        // Name the app so desktop environments can identify the
+        // window: on Wayland the `app_id`, on X11 the `WM_CLASS`
+        // (one call sets both — the same winit field feeds each
+        // backend). Taskbars resolve the icon by matching this
+        // against the installed `pmd85.desktop` — Wayland ignores
+        // the window icon set above entirely.
+        #[cfg(target_os = "linux")]
+        let attrs =
+            winit::platform::wayland::WindowAttributesExtWayland::with_name(attrs, APP_ID, APP_ID);
         let window = Arc::new(event_loop.create_window(attrs).expect("cannot create window"));
 
         let ctx = self.app.ctx.clone();
@@ -261,4 +277,31 @@ fn main() {
         alt_held: false,
     };
     event_loop.run_app(&mut application).expect("event loop failed");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shipped desktop entry stays in sync with the app id the
+    /// window announces: the taskbar matches the two to resolve the
+    /// icon (on Wayland it comes only from the desktop entry).
+    #[test]
+    fn desktop_entry_matches_the_app_id() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../dist/pmd85.desktop");
+        let desktop = std::fs::read_to_string(path).expect("dist/pmd85.desktop exists");
+        assert!(desktop.contains("Type=Application"));
+        assert!(
+            desktop.contains(&format!("StartupWMClass={APP_ID}")),
+            "the taskbar matches the window's id"
+        );
+        assert!(
+            desktop.contains(&format!("Icon={APP_ID}")),
+            "the installed icon name"
+        );
+        assert!(
+            desktop.contains("Exec=@BIN@"),
+            "the placeholder dist/install-user.sh substitutes"
+        );
+    }
 }

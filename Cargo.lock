@@ -2534,6 +2534,7 @@ dependencies = [
  "egui-winit",
  "egui_dock",
  "env_logger",
+ "image",
  "log",
  "pmd85-core",
  "pollster 0.3.0",
