@@ -557,6 +557,64 @@ mod tests {
         );
     }
 
+    /// The window geometry persists through `layout.json` like the
+    /// dock layout does: the last floating size and the maximized
+    /// state come back on the next start.
+    #[test]
+    fn window_geometry_survives_a_restart() {
+        let dir = state_scratch_dir("window-layout");
+        let mut app = test_app();
+        app.set_settings_dir(dir.clone());
+        // A floating window of a distinctive size.
+        app.window_size = egui::vec2(1234.0, 567.0);
+        app.save_layout();
+
+        let mut app2 = test_app();
+        app2.set_settings_dir(dir.clone());
+        app2.restore_layout();
+        assert_eq!(app2.window_size, egui::vec2(1234.0, 567.0));
+        assert!(!app2.window_start_maximized);
+
+        // Closing while maximized remembers that — and the last
+        // floating size, not the maximized one.
+        app.window_maximized = true;
+        app.save_layout();
+        let mut app3 = test_app();
+        app3.set_settings_dir(dir.clone());
+        app3.restore_layout();
+        assert!(app3.window_start_maximized);
+        assert_eq!(app3.window_size, egui::vec2(1234.0, 567.0));
+
+        // A corrupt geometry must not make an absurd window: the
+        // size is clamped to something sane.
+        std::fs::write(
+            app.layout_path().unwrap(),
+            r#"{"window": {"size": [0.0, -5.0], "maximized": false}}"#,
+        )
+        .unwrap();
+        let mut app4 = test_app();
+        app4.set_settings_dir(dir.clone());
+        app4.restore_layout();
+        assert!(
+            app4.window_size.x >= 320.0 && app4.window_size.y >= 320.0,
+            "clamped, got {}x{}",
+            app4.window_size.x,
+            app4.window_size.y
+        );
+        assert!(!app4.window_start_maximized);
+
+        // A layout file from before this feature (no "window" key)
+        // restores the dock and leaves the geometry at the default.
+        let legacy = serde_json::to_string(&crate::ui::dock::default_dock()).unwrap();
+        std::fs::write(app.layout_path().unwrap(), legacy).unwrap();
+        let mut app5 = test_app();
+        app5.set_settings_dir(dir.clone());
+        app5.restore_layout();
+        assert_eq!(app5.window_size, egui::vec2(980.0, 760.0));
+        assert!(!app5.window_start_maximized);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The dock layout persists through `layout.json`: what was
     /// visible and docked when the app exited comes back, and a
     /// corrupt file falls back to the default instead of panicking.

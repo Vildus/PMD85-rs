@@ -58,7 +58,13 @@ impl ApplicationHandler for Application {
         }
         let attrs = Window::default_attributes()
             .with_title("PMD 85 \u{2014} Tesla")
-            .with_inner_size(winit::dpi::LogicalSize::new(980, 760))
+            // The size the last run exited with (see `layout.json`);
+            // points, so it survives a different display scale.
+            .with_inner_size(winit::dpi::LogicalSize::new(
+                self.app.window_size.x,
+                self.app.window_size.y,
+            ))
+            .with_maximized(self.app.window_start_maximized)
             .with_window_icon(icon::window_icon())
             // The custom titlebar replaces the system frame; the
             // system frame is drawn exactly when the custom bar is
@@ -221,6 +227,13 @@ impl Application {
 
         // 2. egui pass: input, UI, platform output.
         self.app.window_maximized = w.window.is_maximized();
+        // Track the floating size for the next start — the maximized
+        // size is not a useful restore size.
+        if !self.app.window_maximized {
+            let scale = w.window.scale_factor();
+            let size = w.window.inner_size().to_logical::<f32>(scale);
+            self.app.window_size = egui::vec2(size.width, size.height);
+        }
         let mut raw_input = w.egui_winit.take_egui_input(&w.window);
         // The compositor that ran the last interactive move/resize
         // consumed the button release; give egui that release now,

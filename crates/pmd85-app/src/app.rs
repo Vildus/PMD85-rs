@@ -42,6 +42,45 @@ pub(crate) fn sanitize_layout(value: &mut serde_json::Value) {
     }
 }
 
+/// Remembered window geometry, stored alongside the dock layout in
+/// `layout.json` (under its own `"window"` key): the inner size from
+/// the last time the window was not maximized, and whether it was
+/// maximized when the app exited.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct WindowLayout {
+    /// Inner size in points, `[width, height]`.
+    pub size: [f32; 2],
+    pub maximized: bool,
+}
+
+impl Default for WindowLayout {
+    fn default() -> Self {
+        WindowLayout {
+            size: [980.0, 760.0],
+            maximized: false,
+        }
+    }
+}
+
+impl WindowLayout {
+    /// The layout with its size forced to something sane: a corrupt
+    /// or hand-edited file must not produce a zero, negative or
+    /// absurd window.
+    fn sanitized(self) -> Self {
+        let default = Self::default().size;
+        let mut size = self.size;
+        for (index, dim) in size.iter_mut().enumerate() {
+            *dim = if dim.is_finite() {
+                dim.clamp(320.0, 16384.0)
+            } else {
+                default[index]
+            };
+        }
+        WindowLayout { size, ..self }
+    }
+}
+
 /// Emulated screen size (pixels).
 pub const SCREEN: (usize, usize) = (WIDTH, HEIGHT);
 /// How long a notification popup stays on screen.
@@ -428,6 +467,13 @@ pub struct App {
     /// before each frame; drives the titlebar and hides the resize
     /// border).
     pub(crate) window_maximized: bool,
+    /// Inner size of the window in points, tracked while the window
+    /// is not maximized — what the next start restores (the maximized
+    /// size is not a useful restore size).
+    pub(crate) window_size: egui::Vec2,
+    /// Whether this run's window should start maximized (from the
+    /// restored layout; consumed at window creation).
+    pub(crate) window_start_maximized: bool,
     /// Window-management requests from the UI, drained by the winit
     /// loop after each frame.
     pub(crate) window_requests: Vec<WindowRequest>,
@@ -506,6 +552,8 @@ impl App {
             decode_buf: Vec::new(),
             icon: None,
             window_maximized: false,
+            window_size: egui::vec2(980.0, 760.0),
+            window_start_maximized: false,
             window_requests: Vec::new(),
             notifications: VecDeque::new(),
             settings_dir: config::config_dir(),
@@ -842,8 +890,9 @@ impl App {
     }
 
     /// Remember the dock layout: which panels are visible and where
-    /// they are docked (including floating windows). Written when
-    /// the app exits; never fatal.
+    /// they are docked (including floating windows), plus the window
+    /// geometry under its own key. Written when the app exits; never
+    /// fatal.
     pub fn save_layout(&self) {
         let Some(path) = self.layout_path() else {
             return;
@@ -855,6 +904,15 @@ impl App {
                 return;
             }
         };
+        // The window geometry rides along under its own key. The dock
+        // deserializer ignores unknown keys, so both directions are
+        // compatible: old files have no window, and old builds
+        // reading new files skip it.
+        if let serde_json::Value::Object(map) = &mut json {
+            if let Ok(window) = serde_json::to_value(self.window_layout()) {
+                map.insert("window".into(), window);
+            }
+        }
         sanitize_layout(&mut json);
         if let Err(e) = std::fs::write(&path, json.to_string()) {
             log::warn!("cannot write the dock layout: {e}");
@@ -868,19 +926,46 @@ impl App {
         let Some(path) = self.layout_path() else {
             return;
         };
-        let restored = std::fs::read_to_string(&path)
+        let parsed = std::fs::read_to_string(&path)
             .ok()
             .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
             .map(|mut json| {
                 sanitize_layout(&mut json);
-                serde_json::from_value::<egui_dock::DockState<crate::ui::dock::Tab>>(json)
-            })
-            .and_then(|parsed| parsed.ok());
-        match restored {
+                // The window geometry rides along under its own key
+                // (see [`App::save_layout`]); take it before the dock
+                // parse, which ignores it.
+                let window = json
+                    .get("window")
+                    .cloned()
+                    .and_then(|w| serde_json::from_value::<WindowLayout>(w).ok())
+                    .map(WindowLayout::sanitized);
+                let dock =
+                    serde_json::from_value::<egui_dock::DockState<crate::ui::dock::Tab>>(json);
+                (window, dock)
+            });
+        let Some((window, dock)) = parsed else {
+            log::info!("dock layout not restored; using the default");
+            return;
+        };
+        if let Some(window) = window {
+            self.window_size = egui::vec2(window.size[0], window.size[1]);
+            self.window_start_maximized = window.maximized;
+        }
+        match dock.ok() {
             Some(dock) if dock.find_tab(&crate::ui::dock::Tab::Screen).is_some() => {
                 self.ui.dock = dock;
             }
             _ => log::info!("dock layout not restored; using the default"),
+        }
+    }
+
+    /// The window geometry to remember for the next start: the last
+    /// size seen while not maximized, and whether the window is
+    /// maximized now.
+    fn window_layout(&self) -> WindowLayout {
+        WindowLayout {
+            size: [self.window_size.x, self.window_size.y],
+            maximized: self.window_maximized,
         }
     }
 
