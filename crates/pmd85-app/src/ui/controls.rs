@@ -153,45 +153,15 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
 
                 ui.separator();
 
-                // ---- debugger ----
-                ui.strong("DEBUG");
-                if icon_button(
-                    ui,
-                    icon::STEPS,
-                    true,
-                    "Step one instruction (Alt+F10)",
-                    c(&theme.accent),
-                ) {
-                    app.debug_step();
-                }
-                if icon_button(
-                    ui,
-                    icon::SKIP_FORWARD,
-                    true,
-                    "Step over a call (Alt+F11)",
-                    c(&theme.accent),
-                ) {
-                    app.debug_step_over();
-                }
-                if icon_button(
-                    ui,
-                    icon::PLAY,
-                    true,
-                    "Continue after a breakpoint (Alt+F12)",
-                    c(&theme.accent),
-                ) {
-                    app.debug_continue();
-                }
-                // The debugger panels as dock tabs.
-                let cpu = egui::Button::new(egui::RichText::new(icon::CPU).size(14.0))
-                    .selected(dock::tab_visible(&app.ui.dock, dock::Tab::Cpu));
-                if ui.add(cpu).on_hover_text("CPU registers").clicked() {
-                    dock::toggle_tab(&mut app.ui.dock, dock::Tab::Cpu);
-                }
-                let dis = egui::Button::new(egui::RichText::new(icon::LIST_BULLETS).size(14.0))
-                    .selected(dock::tab_visible(&app.ui.dock, dock::Tab::Disassembly));
-                if ui.add(dis).on_hover_text("Disassembly").clicked() {
-                    dock::toggle_tab(&mut app.ui.dock, dock::Tab::Disassembly);
+                // ---- debugger panels ----
+                let debugger = egui::Button::new(egui::RichText::new(icon::LIST_BULLETS).size(14.0))
+                    .selected(dock::tab_visible(&app.ui.dock, dock::Tab::Debugger));
+                if ui
+                    .add(debugger)
+                    .on_hover_text("Debugger: CPU, disassembly, breakpoints")
+                    .clicked()
+                {
+                    dock::toggle_tab(&mut app.ui.dock, dock::Tab::Debugger);
                 }
                 let mem = egui::Button::new(egui::RichText::new(icon::MEMORY).size(14.0))
                     .selected(dock::tab_visible(&app.ui.dock, dock::Tab::Memory));

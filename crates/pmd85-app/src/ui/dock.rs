@@ -21,10 +21,11 @@ pub enum Tab {
     Keyboard,
     /// The cassette tape editor.
     Tape,
-    /// The CPU registers and flags.
-    Cpu,
-    /// The disassembly with breakpoints.
-    Disassembly,
+    /// The debugger: register strip, step controls, disassembly
+    /// with breakpoints. (Deserialization also accepts the former
+    /// "Cpu" and "Disassembly" tabs of split layouts.)
+    #[serde(alias = "Cpu", alias = "Disassembly")]
+    Debugger,
     /// The memory dump.
     Memory,
 }
@@ -36,8 +37,7 @@ impl Tab {
             Tab::Screen => "Screen",
             Tab::Keyboard => "Keyboard",
             Tab::Tape => "Cassette tape",
-            Tab::Cpu => "CPU",
-            Tab::Disassembly => "Disassembly",
+            Tab::Debugger => "Debugger",
             Tab::Memory => "Memory",
         }
     }
@@ -184,8 +184,7 @@ impl TabViewer for Viewer<'_> {
             Tab::Screen => screen::draw(ui, self.app),
             Tab::Keyboard => keyboard::ui(ui, self.app),
             Tab::Tape => tape::ui(ui, self.app),
-            Tab::Cpu => debug::cpu(ui, self.app),
-            Tab::Disassembly => debug::listing(ui, self.app),
+            Tab::Debugger => debug::debugger(ui, self.app),
             Tab::Memory => debug::memory(ui, self.app),
         };
     }
@@ -258,5 +257,17 @@ mod tests {
         assert!(tab_visible(&restored, Tab::Screen));
         assert!(tab_visible(&restored, Tab::Keyboard));
         assert!(tab_visible(&restored, Tab::Tape));
+    }
+
+    /// Layouts saved before the merge name the split "Cpu" and
+    /// "Disassembly" tabs; both must restore as the merged Debugger
+    /// tab instead of failing (which would drop the whole layout).
+    #[test]
+    fn former_tab_names_restore_as_the_debugger() {
+        let json = r#"["Screen","Cpu","Disassembly","Debugger","Memory","Keyboard","Tape"]"#;
+        let tabs: Vec<Tab> = serde_json::from_str(json).expect("old tab names deserialize");
+        assert_eq!(tabs[1], Tab::Debugger);
+        assert_eq!(tabs[2], Tab::Debugger);
+        assert_eq!(tabs[4], Tab::Memory);
     }
 }

@@ -259,8 +259,7 @@ mod tests {
                 "debugger-open",
                 Box::new(|a| {
                     for tab in [
-                        crate::ui::dock::Tab::Cpu,
-                        crate::ui::dock::Tab::Disassembly,
+                        crate::ui::dock::Tab::Debugger,
                         crate::ui::dock::Tab::Memory,
                     ] {
                         crate::ui::dock::show_tab(&mut a.ui.dock, tab);
@@ -271,8 +270,7 @@ mod tests {
                 "debugger-at-breakpoint",
                 Box::new(|a| {
                     for tab in [
-                        crate::ui::dock::Tab::Cpu,
-                        crate::ui::dock::Tab::Disassembly,
+                        crate::ui::dock::Tab::Debugger,
                         crate::ui::dock::Tab::Memory,
                     ] {
                         crate::ui::dock::show_tab(&mut a.ui.dock, tab);
@@ -285,7 +283,7 @@ mod tests {
             (
                 "debugger-halted",
                 Box::new(|a| {
-                    crate::ui::dock::show_tab(&mut a.ui.dock, crate::ui::dock::Tab::Cpu);
+                    crate::ui::dock::show_tab(&mut a.ui.dock, crate::ui::dock::Tab::Debugger);
                     a.machine.cpu.halted = true;
                     a.set_running(false);
                 }),
@@ -293,9 +291,17 @@ mod tests {
             (
                 "debugger-follow-off",
                 Box::new(|a| {
-                    crate::ui::dock::show_tab(&mut a.ui.dock, crate::ui::dock::Tab::Disassembly);
+                    crate::ui::dock::show_tab(&mut a.ui.dock, crate::ui::dock::Tab::Debugger);
                     a.ui.debug.follow_pc = false;
                     a.ui.debug.anchor = 0xE000;
+                }),
+            ),
+            (
+                "debugger-scrolled",
+                Box::new(|a| {
+                    crate::ui::dock::show_tab(&mut a.ui.dock, crate::ui::dock::Tab::Debugger);
+                    // Peeking as far down and up as the clamp allows.
+                    a.ui.debug.offset = 1000;
                 }),
             ),
         ];
