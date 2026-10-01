@@ -10,7 +10,7 @@
 
 use crate::app::App;
 use crate::ui::theme::Theme;
-use egui_phosphor::fill as icon;
+use egui_phosphor::regular as icon;
 use pmd85_core::tape::FileHeader;
 use std::path::PathBuf;
 

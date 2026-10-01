@@ -11,16 +11,16 @@ path = "src/main.rs"
 
 [dependencies]
 pmd85-core = { workspace = true }
-wgpu = "30"
+wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "vulkan", "dx12", "metal", "wgsl"] }
 winit = "0.30"
 pollster = "0.3"
 log = "0.4"
-env_logger = "0.11"
+env_logger = { version = "0.11", default-features = false }
 cpal = "0.18"
 egui = "0.36"
-egui-wgpu = { version = "0.36", features = ["winit", "x11", "wayland"] }
+egui-wgpu = { version = "0.36", default-features = false, features = ["winit", "x11", "wayland"] }
 egui-winit = "0.36"
-egui-phosphor = { version = "0.14", features = ["regular", "fill"] }
+egui-phosphor = { version = "0.14", features = ["subset"] }
 egui_dock = { version = "0.21", features = ["serde"] }
 rfd = "0.15"
 raw-window-handle = "0.6"

@@ -4,7 +4,7 @@
 use crate::app::App;
 use crate::ui::dock;
 use crate::ui::theme::Theme;
-use egui_phosphor::fill as icon;
+use egui_phosphor::regular as icon;
 
 /// Small square icon button; returns `true` when clicked.
 fn icon_button(

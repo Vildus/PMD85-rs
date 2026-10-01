@@ -66,6 +66,22 @@ fn rgba(hex: u32) -> [u8; 4] {
     [r, g, b, a]
 }
 
+// Phosphor icons. Only the glyphs named here are embedded — a few KB
+// instead of the full ~490 KB font (the subset is computed at compile
+// time). An icon missing from this list renders as a hollow box: add
+// the new `use` line here whenever an icon is introduced.
+egui_phosphor::subset! {
+    /// Icons used by this app, as a proportional-text fallback.
+    pub mod icons {
+        use regular::{
+            ARROW_CLOCKWISE, ARROW_DOWN, ARROW_UP, CASSETTE_TAPE, CORNERS_OUT, DOWNLOAD_SIMPLE,
+            FILE_PLUS, FLOPPY_DISK, FLOPPY_DISK_BACK, FOLDER_OPEN, GEAR, KEYBOARD, LIST_BULLETS,
+            MEMORY, MINUS, PAUSE, PLAY, RECORD, SKIP_FORWARD, SPEAKER_HIGH, SPEAKER_SLASH,
+            SPEAKER_X, SQUARE, STEPS, STOP, TRASH, UPLOAD_SIMPLE, WARNING_CIRCLE, X,
+        };
+    }
+}
+
 impl Theme {
     /// The default: green phosphor on green-black, amber warnings.
     pub fn brigadier() -> Self {
@@ -227,14 +243,9 @@ impl Theme {
             egui::FontFamily::Name("semibold".into()),
             vec!["ibm-plex-mono-semibold".into()],
         );
-        // Phosphor icons: regular glyphs mixed into running text, the
-        // filled variant selectable via the "phosphor-fill" family.
-        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::variants::Variant::Regular);
-        egui_phosphor::add_font_bytes_as_family(
-            &mut fonts,
-            "phosphor-fill",
-            egui_phosphor::variants::Variant::Fill.font_bytes(),
-        );
+        // Phosphor icons, subsetted to the glyphs we use (see the
+        // `icons` module above) and mixed into running text.
+        icons::regular::add_to_fonts(&mut fonts);
         ctx.set_fonts(fonts);
     }
 

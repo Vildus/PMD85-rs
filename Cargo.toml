@@ -12,3 +12,8 @@ pmd85-core = { path = "crates/pmd85-core" }
 
 [profile.release]
 opt-level = 3
+# Smaller binary: no symbol table (panic backtraces lose names),
+# cross-crate inlining, one codegen unit.
+strip = true
+lto = "thin"
+codegen-units = 1

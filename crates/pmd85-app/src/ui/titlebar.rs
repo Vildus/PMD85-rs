@@ -9,7 +9,7 @@
 
 use crate::app::{App, WindowRequest};
 use crate::ui::theme::Theme;
-use egui_phosphor::fill as icon;
+use egui_phosphor::regular as icon;
 use winit::window::ResizeDirection;
 
 /// Height of the titlebar: the transport-bar button height (24)
