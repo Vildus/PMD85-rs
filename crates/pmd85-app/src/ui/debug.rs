@@ -163,6 +163,23 @@ fn register_strip(ui: &mut egui::Ui, app: &mut App) {
     }
 }
 
+/// Change the follow mode without the view jumping: turning follow
+/// off captures the window the listing is showing right now as the
+/// free-mode anchor (the view stays exactly where it is); turning it
+/// on re-centers on the PC.
+fn set_follow(d: &mut DebugState, follow: bool, m: &Machine) {
+    if follow == d.follow_pc {
+        return;
+    }
+    if follow {
+        d.follow_pc = true;
+        d.offset = 0;
+    } else {
+        d.anchor = window_start(m, true, d.anchor, d.offset);
+        d.follow_pc = false;
+    }
+}
+
 /// The step controls (Step / Over / Continue), the follow-PC checkbox
 /// and the goto field.
 fn toolbar(ui: &mut egui::Ui, app: &mut App) {
@@ -195,14 +212,13 @@ fn toolbar(ui: &mut egui::Ui, app: &mut App) {
         }
         ui.separator();
 
-        // Follow PC: while checked the PC stays in view; re-checking
-        // snaps the view back onto it.
-        let was_following = app.ui.debug.follow_pc;
-        ui.checkbox(&mut app.ui.debug.follow_pc, "follow PC")
+        // Follow PC: while checked the PC stays in view; unchecking
+        // freezes the view where it is, re-checking snaps back onto
+        // the PC.
+        let mut follow = app.ui.debug.follow_pc;
+        ui.checkbox(&mut follow, "follow PC")
             .on_hover_text("Keep the PC in view; scrolling only peeks around it");
-        if !was_following && app.ui.debug.follow_pc {
-            app.ui.debug.offset = 0;
-        }
+        set_follow(&mut app.ui.debug, follow, &app.machine);
 
         ui.add_space(8.0);
         let edit = ui.add(
@@ -226,8 +242,13 @@ fn toolbar(ui: &mut egui::Ui, app: &mut App) {
 /// highlighted.
 fn listing(ui: &mut egui::Ui, app: &mut App) {
     let theme = app.active_theme_data();
-    let line_h = ui.text_style_height(&egui::TextStyle::Monospace);
-    let rows = ((ui.available_height() / line_h) as usize).clamp(MIN_ROWS, MAX_ROWS);
+    // The real stride of one listed row: the rendered 12 pt monospace
+    // row plus the spacing between rows. Measured, not guessed, so
+    // the listing fills the panel without ever overflowing it (the
+    // tab body does not scroll — the listing scrolls itself).
+    let row_font = egui::FontId::monospace(12.0);
+    let stride = ui.fonts_mut(|f| f.row_height(&row_font)) + ui.spacing().item_spacing.y;
+    let rows = ((ui.available_height() / stride) as usize).clamp(MIN_ROWS, MAX_ROWS);
 
     // The wheel scrolls: in follow mode by peeking around the PC
     // (clamped so it stays visible), in free mode by walking the
@@ -519,5 +540,37 @@ mod tests {
         }
         // Free mode ignores the PC and starts at the anchor.
         assert_eq!(window_start(&m, false, 0xE000, 7), 0xE000);
+    }
+
+    /// Unchecking follow PC must freeze the view where it is (the
+    /// free anchor becomes the window the listing is showing), not
+    /// teleport to a stale anchor; re-checking re-centers on the PC.
+    #[test]
+    fn toggling_follow_off_keeps_the_view() {
+        let mut m = Machine::new(Model::Pmd853, &[0u8; 0x2000], None);
+        m.cpu.pc = 0x0500;
+        let mut d = DebugState {
+            offset: 3,
+            ..DebugState::default()
+        };
+        let shown = window_start(&m, true, d.anchor, d.offset);
+
+        set_follow(&mut d, false, &m);
+        assert!(!d.follow_pc);
+        assert_eq!(d.anchor, shown, "the view stays where it was");
+        // The offset is left alone (free mode does not use it).
+        assert_eq!(d.offset, 3);
+
+        // Free mode: the anchor is used as-is.
+        assert_eq!(window_start(&m, d.follow_pc, d.anchor, d.offset), shown);
+
+        // Re-checking follows again from the default offset.
+        set_follow(&mut d, true, &m);
+        assert!(d.follow_pc);
+        assert_eq!(d.offset, 0);
+
+        // A no-op toggle changes nothing.
+        set_follow(&mut d, true, &m);
+        assert_eq!(d.offset, 0);
     }
 }

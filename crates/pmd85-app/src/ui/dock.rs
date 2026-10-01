@@ -189,6 +189,20 @@ impl TabViewer for Viewer<'_> {
         };
     }
 
+    /// egui_dock wraps every tab body in a ScrollArea; scrolling there
+    /// is the panel-internal kind. The Debugger and Memory tabs
+    /// manage their own scrolling (the follow-PC offset window and
+    /// the virtualized dump) — a body that scrolls on top of that
+    /// would push the register strip and toolbar off screen. The
+    /// keyboard legend and tape editor keep native scrolling, as
+    /// their content legitimately overflows.
+    fn scroll_bars(&self, tab: &Self::Tab) -> [bool; 2] {
+        match tab {
+            Tab::Debugger | Tab::Memory => [false, false],
+            _ => [true, true],
+        }
+    }
+
     fn on_close(&mut self, tab: &mut Tab) -> OnCloseResponse {
         // Closing the keyboard must release a pointer-held key.
         if *tab == Tab::Keyboard {
