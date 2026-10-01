@@ -24,7 +24,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
-use crate::app::App;
+use crate::app::{App, WindowRequest};
 
 /// The application id: the Wayland `app_id` and the X11 `WM_CLASS`,
 /// which the taskbar matches against the installed `pmd85.desktop`
@@ -44,6 +44,11 @@ struct Application {
     /// Left Alt is held: the keyboard is in host-shortcut mode and no
     /// keys reach the machine until it is released.
     alt_held: bool,
+    /// The previous frame handed the pointer to the compositor for an
+    /// interactive move/resize, which consumes the button release:
+    /// the next frame must give egui that release itself (see
+    /// [`pointer_release_event`]).
+    pointer_release_due: bool,
 }
 
 impl ApplicationHandler for Application {
@@ -54,7 +59,11 @@ impl ApplicationHandler for Application {
         let attrs = Window::default_attributes()
             .with_title("PMD 85 \u{2014} Tesla")
             .with_inner_size(winit::dpi::LogicalSize::new(980, 760))
-            .with_window_icon(icon::window_icon());
+            .with_window_icon(icon::window_icon())
+            // The custom titlebar replaces the system frame; the
+            // system frame is drawn exactly when the custom bar is
+            // off (the persisted setting).
+            .with_decorations(!self.app.settings.custom_titlebar);
         // Name the app so desktop environments can identify the
         // window: on Wayland the `app_id`, on X11 the `WM_CLASS`
         // (one call sets both — the same winit field feeds each
@@ -211,11 +220,61 @@ impl Application {
         self.app.advance();
 
         // 2. egui pass: input, UI, platform output.
-        let raw_input = w.egui_winit.take_egui_input(&w.window);
+        self.app.window_maximized = w.window.is_maximized();
+        let mut raw_input = w.egui_winit.take_egui_input(&w.window);
+        // The compositor that ran the last interactive move/resize
+        // consumed the button release; give egui that release now,
+        // at the pointer position it last saw, so its state machine
+        // ends the drag cleanly (button up, pointer still in the
+        // window — hover and cursors keep working).
+        if self.pointer_release_due {
+            self.pointer_release_due = false;
+            if let Some((pos, modifiers)) = self
+                .app
+                .ctx
+                .input(|i| i.pointer.latest_pos().map(|pos| (pos, i.modifiers)))
+            {
+                raw_input
+                    .events
+                    .push(pointer_release_event(pos, modifiers));
+            }
+        }
         let ctx = self.app.ctx.clone();
         let full_output = ctx.run_ui(raw_input, |ui| ui::draw(&mut self.app, ui));
         w.egui_winit
             .handle_platform_output(&w.window, full_output.platform_output);
+
+        // Window management the UI asked for (titlebar buttons, drag,
+        // resize edges). Applied right after the frame that requested
+        // them, while the pointer press that motivates a drag/resize
+        // is still held — Wayland requires its serial.
+        for request in self.app.take_window_requests() {
+            match request {
+                WindowRequest::Drag => {
+                    if let Err(e) = w.window.drag_window() {
+                        log::warn!("cannot start a window drag: {e}");
+                    }
+                    // The compositor takes the pointer and consumes
+                    // the button release — egui would keep thinking
+                    // the button is held (no hover, no new drags)
+                    // until some other click cleared it. The next
+                    // frame replays the release it never saw.
+                    self.pointer_release_due = true;
+                }
+                WindowRequest::Resize(direction) => {
+                    if let Err(e) = w.window.drag_resize_window(direction) {
+                        log::warn!("cannot start a window resize: {e}");
+                    }
+                    self.pointer_release_due = true;
+                }
+                WindowRequest::Minimize => w.window.set_minimized(true),
+                WindowRequest::ToggleMaximize => {
+                    w.window.set_maximized(!w.window.is_maximized())
+                }
+                WindowRequest::Decorate(on) => w.window.set_decorations(on),
+                WindowRequest::Close => event_loop.exit(),
+            }
+        }
 
         // 3. Paint: tessellate and hand to the wgpu painter.
         let pixels_per_point = full_output.pixels_per_point;
@@ -275,8 +334,22 @@ fn main() {
         app,
         windowing: None,
         alt_held: false,
+        pointer_release_due: false,
     };
     event_loop.run_app(&mut application).expect("event loop failed");
+}
+
+/// The button-release event for a compositor-driven interactive
+/// move/resize: the compositor consumes the real release, so this
+/// replays it to egui — same button, released, at the pointer
+/// position egui last saw, with the current keyboard modifiers.
+fn pointer_release_event(pos: egui::Pos2, modifiers: egui::Modifiers) -> egui::Event {
+    egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers,
+    }
 }
 
 #[cfg(test)]
@@ -303,5 +376,31 @@ mod tests {
             desktop.contains("Exec=@BIN@"),
             "the placeholder dist/install-user.sh substitutes"
         );
+    }
+
+    /// The synthetic release the winit loop injects after a
+    /// compositor drag/resize is exactly a primary-button release at
+    /// the pointer's last known position.
+    #[test]
+    fn pointer_release_replays_a_primary_release() {
+        let pos = egui::pos2(100.0, 200.0);
+        let modifiers = egui::Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+        match pointer_release_event(pos, modifiers) {
+            egui::Event::PointerButton {
+                pos: event_pos,
+                button,
+                pressed,
+                modifiers: event_modifiers,
+            } => {
+                assert_eq!(event_pos, pos);
+                assert_eq!(button, egui::PointerButton::Primary);
+                assert!(!pressed, "the release is a release");
+                assert!(event_modifiers.alt);
+            }
+            event => panic!("not a PointerButton event: {event:?}"),
+        }
     }
 }

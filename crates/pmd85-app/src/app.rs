@@ -366,6 +366,27 @@ impl TapeState {
 }
 
 /// The whole application state, minus windowing.
+/// What the UI asks the window manager to do. The UI draws with only
+/// `&mut App` and cannot touch the window, so the custom titlebar
+/// queues these and the winit loop drains them after each frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WindowRequest {
+    /// Begin an interactive move (a titlebar drag).
+    Drag,
+    /// Begin an interactive resize from the given screen edge.
+    Resize(winit::window::ResizeDirection),
+    /// Minimize the window.
+    Minimize,
+    /// Maximize the window, or restore it if it already is.
+    ToggleMaximize,
+    /// Show/hide the system window frame (the custom-titlebar
+    /// setting; the system frame is shown exactly when the custom
+    /// titlebar is not).
+    Decorate(bool),
+    /// Quit the app, like the system close button (saves the session).
+    Close,
+}
+
 pub struct App {
     pub ctx: egui::Context,
     pub machine: Machine,
@@ -399,6 +420,17 @@ pub struct App {
     /// Emulated screen texture (created lazily on first UI pass).
     pub screen: Option<egui::TextureHandle>,
     pub decode_buf: Vec<u8>,
+
+    /// App icon texture for the custom titlebar (lazy, like
+    /// [`App::screen`]).
+    pub icon: Option<egui::TextureHandle>,
+    /// Whether the window is maximized (published by the winit loop
+    /// before each frame; drives the titlebar and hides the resize
+    /// border).
+    pub(crate) window_maximized: bool,
+    /// Window-management requests from the UI, drained by the winit
+    /// loop after each frame.
+    pub(crate) window_requests: Vec<WindowRequest>,
 
     /// Transient error/info popups.
     notifications: VecDeque<(String, Instant)>,
@@ -472,6 +504,9 @@ impl App {
             active_theme: String::new(),
             screen: None,
             decode_buf: Vec::new(),
+            icon: None,
+            window_maximized: false,
+            window_requests: Vec::new(),
             notifications: VecDeque::new(),
             settings_dir: config::config_dir(),
             render_times: VecDeque::new(),
@@ -1120,6 +1155,18 @@ impl App {
         if let Some(dir) = &self.settings_dir {
             self.settings.save(dir);
         }
+    }
+
+    /// Queue a window-management request for the winit loop (the UI
+    /// cannot reach the window itself).
+    pub(crate) fn request_window(&mut self, request: WindowRequest) {
+        self.window_requests.push(request);
+    }
+
+    /// Take the pending window requests (the winit loop applies them
+    /// after each frame).
+    pub(crate) fn take_window_requests(&mut self) -> Vec<WindowRequest> {
+        std::mem::take(&mut self.window_requests)
     }
 
     /// Point persisted settings at `dir` (tests write to a scratch

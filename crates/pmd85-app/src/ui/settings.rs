@@ -2,7 +2,7 @@
 //! themes (with live palette customization and export), plus the
 //! "restart machine?" confirmation dialog.
 
-use crate::app::{App, MachineConfig};
+use crate::app::{App, MachineConfig, WindowRequest};
 use crate::ui::theme::Theme;
 use egui_phosphor::regular as icon;
 use pmd85_core::Model;
@@ -187,6 +187,22 @@ fn draw_settings_window(ctx: &egui::Context, app: &mut App) {
             ui.checkbox(&mut app.settings.mute, "Mute speaker");
             if app.settings.mute != mute_before {
                 app.set_mute(app.settings.mute);
+            }
+
+            ui.separator();
+
+            // ---- window ----
+            let titlebar_before = app.settings.custom_titlebar;
+            ui.checkbox(&mut app.settings.custom_titlebar, "Custom titlebar")
+                .on_hover_text(
+                    "Draw the app's own titlebar (and resize borders) instead of \
+                     the system window frame",
+                );
+            if app.settings.custom_titlebar != titlebar_before {
+                // The system frame shows exactly when the custom bar
+                // is off; switch it live, not on restart.
+                app.request_window(WindowRequest::Decorate(!app.settings.custom_titlebar));
+                app.persist();
             }
 
             ui.separator();

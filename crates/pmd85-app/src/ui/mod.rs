@@ -12,6 +12,7 @@ pub mod settings;
 pub mod status;
 pub mod tape;
 pub mod theme;
+pub mod titlebar;
 
 use crate::app::App;
 
@@ -61,11 +62,22 @@ impl Default for UiState {
 /// Draw the whole UI for one frame (between `begin_pass`/`end_pass`).
 /// `ui` is the root Ui covering the window.
 pub fn draw(app: &mut App, ui: &mut egui::Ui) {
+    // The custom titlebar replaces the system window frame when the
+    // setting is on; the system frame is drawn exactly when it is
+    // not (set at window creation, switched live by the setting).
+    if app.settings.custom_titlebar {
+        titlebar::draw(ui, app);
+    }
     controls::draw(ui, app);
     status::draw(ui, app);
     // Everything between the bars is the dock area; the screen is its
     // non-closable center tab, the tools dock around it.
     dock::draw(ui, app);
+    // The resize border overlays the window edges, above everything
+    // except floating windows (settings, notifications) and popups.
+    if app.settings.custom_titlebar {
+        titlebar::border(ui, app);
+    }
     let ctx = ui.ctx().clone();
     settings::draw(&ctx, app);
     draw_notifications(&ctx, app);
@@ -153,6 +165,14 @@ mod tests {
             (
                 "settings-open",
                 Box::new(|a| a.ui.settings_open = true),
+            ),
+            (
+                "titlebar-off",
+                Box::new(|a| a.settings.custom_titlebar = false),
+            ),
+            (
+                "maximized",
+                Box::new(|a| a.window_maximized = true),
             ),
             (
                 "keyboard-open",
@@ -327,6 +347,29 @@ mod tests {
         assert!(app.machine.bus.total_cycles() > before);
         assert!(app.frames_done >= 1);
         assert!(app.screen.is_some(), "screen texture created");
+    }
+
+    /// Window requests from the UI queue up for the winit loop and
+    /// are drained once, in order.
+    #[test]
+    fn window_requests_queue_and_drain() {
+        use crate::app::WindowRequest;
+        let mut app = test_app();
+        assert!(app.take_window_requests().is_empty(), "starts quiet");
+
+        app.request_window(WindowRequest::Minimize);
+        app.request_window(WindowRequest::ToggleMaximize);
+        app.request_window(WindowRequest::Close);
+        assert_eq!(
+            app.take_window_requests(),
+            vec![
+                WindowRequest::Minimize,
+                WindowRequest::ToggleMaximize,
+                WindowRequest::Close,
+            ]
+        );
+        // Drained: a second take must not repeat them.
+        assert!(app.take_window_requests().is_empty());
     }
 
     #[test]

@@ -35,6 +35,9 @@ pub struct AppSettings {
     /// intercepted and fed the block data directly (settings key kept
     /// from the old "warp loads" for compatibility).
     pub tape_warp: bool,
+    /// Draw the custom titlebar (minimize/maximize/close buttons,
+    /// drag) instead of the system window frame.
+    pub custom_titlebar: bool,
 }
 
 impl Default for AppSettings {
@@ -49,6 +52,7 @@ impl Default for AppSettings {
             tape_monitor: true,
             tape_autostop: true,
             tape_warp: true,
+            custom_titlebar: true,
         }
     }
 }
@@ -174,6 +178,7 @@ mod tests {
             tape_monitor: false,
             tape_autostop: false,
             tape_warp: false,
+            custom_titlebar: false,
         };
         s.save(&dir);
         let loaded = AppSettings::load(&dir);

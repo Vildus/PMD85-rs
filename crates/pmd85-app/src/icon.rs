@@ -8,17 +8,22 @@ const ICON_PNG: &[u8] = include_bytes!("../../../assets/icon.png");
 /// bars render icons small; 128×128 is plenty.
 const ICON_SIZE: u32 = 128;
 
-/// The app icon for the window (`with_window_icon`). The embedded PNG
-/// is pixel art with large "pixels", so it is downscaled with
-/// nearest-neighbor filtering — anything smoother would smear the
-/// blocky pixels. Any failure means no icon, never fatal.
-pub fn window_icon() -> Option<winit::window::Icon> {
+/// The app icon's raw RGBA pixels at 128×128, the same image the
+/// window icon uses (for the custom titlebar's texture).
+pub fn icon_rgba() -> Option<(Vec<u8>, u32, u32)> {
     let image = image::load_from_memory(ICON_PNG)
         .ok()?
         .resize_exact(ICON_SIZE, ICON_SIZE, image::imageops::FilterType::Nearest)
         .to_rgba8();
     let (width, height) = (image.width(), image.height());
-    winit::window::Icon::from_rgba(image.into_raw(), width, height).ok()
+    Some((image.into_raw(), width, height))
+}
+
+/// The app icon for the window (`with_window_icon`). Any failure
+/// means no icon, never fatal.
+pub fn window_icon() -> Option<winit::window::Icon> {
+    let (rgba, width, height) = icon_rgba()?;
+    winit::window::Icon::from_rgba(rgba, width, height).ok()
 }
 
 #[cfg(test)]
