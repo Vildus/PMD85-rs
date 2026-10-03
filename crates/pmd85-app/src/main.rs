@@ -3,6 +3,11 @@
 //! Owns a winit window painted by egui (via `egui-wgpu`); the emulated
 //! screen is an egui texture updated from VRAM each frame. Emulation
 //! pacing, speed control and audio live in [`app::App`].
+//!
+//! On Windows, release builds run as a GUI app: no console window is
+//! spawned and stdout/stderr go nowhere. Debug builds keep the console
+//! so `cargo run` still shows the logs. No-op on other platforms.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
 mod args;

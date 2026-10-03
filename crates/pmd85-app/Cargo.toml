@@ -9,6 +9,10 @@ license.workspace = true
 name = "pmd85"
 path = "src/main.rs"
 
+[build-dependencies]
+# Windows .exe resources (icon, version info); dormant on other targets.
+winresource = "0.1"
+
 [dependencies]
 pmd85-core = { workspace = true }
 wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "vulkan", "dx12", "metal", "wgsl"] }
