@@ -62,7 +62,6 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
             ui.put(
                 inner_rect,
                 egui::Image::from_texture(&tex).fit_to_exact_size(image_size),
-            )
-            .on_hover_text("PMD 85 screen");
+            );
         });
 }
